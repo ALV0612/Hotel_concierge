@@ -9,7 +9,7 @@ import uvicorn
 from dotenv import load_dotenv
 
 # Import Host Agent từ file của bạn
-from host_agent.agent import HostRuntime, shared_memory
+from agents.host_agent.agent import HostRuntime, shared_memory
 
 load_dotenv()
 
