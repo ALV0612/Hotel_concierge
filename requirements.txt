@@ -1,7 +1,7 @@
-fastapi>=0.110.0  # Version mới hơn tương thích anyio 4.x
-uvicorn==0.24.0
-requests==2.31.0
-python-dotenv==1.0.0
-httpx==0.25.0
+fastapi
+uvicorn
+requests
+python-dotenv
+httpx
 git+https://github.com/google/adk-python.git@main
 google-genai
