@@ -1,0 +1,7 @@
+.env
+.venv
+_pycache_
+sessions
+__pycache__
+phan-quyen-468719-0bc1293b8fea.json
+hotel_vector_db
