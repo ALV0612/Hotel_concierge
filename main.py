@@ -4,6 +4,7 @@ import subprocess
 import time
 import signal
 import atexit
+from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from typing import Dict, Any, Optional, List
 import json
@@ -31,18 +32,22 @@ class MCPServerManager:
             script_dir = os.path.dirname(script_path)
             script_name = os.path.basename(script_path)
             
-            # Set up environment
+            # Set up environment with UTF-8 support
             env = os.environ.copy()
             env['PYTHONPATH'] = os.getcwd() + os.pathsep + env.get('PYTHONPATH', '')
+            env['PYTHONIOENCODING'] = 'utf-8'
+            env['PYTHONUTF8'] = '1'
             
             process = subprocess.Popen([
-                "python", script_name  # Use just filename, not full path
+                "python", "-X", "utf8", script_name
             ], 
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE, 
             text=True,
             env=env,
-            cwd=script_dir if script_dir else os.getcwd()  # Run from script's directory
+            cwd=script_dir if script_dir else os.getcwd(),
+            encoding='utf-8',
+            errors='replace'
             )
             
             self.mcp_servers.append({
@@ -76,11 +81,21 @@ class MCPServerManager:
             else:
                 print(f"⚠️ MCP script not found: {config['script']}")
         
-        # Đợi MCP servers khởi động
+        # Đợi MCP servers khởi động với better health check
         if started_count > 0:
             print(f"⏳ Waiting for {started_count} MCP servers to initialize...")
-            time.sleep(3)  # MCP servers thường start nhanh hơn A2A servers
-            print(f"✅ MCP servers should be ready")
+            time.sleep(5)  # Tăng wait time để handle Unicode init
+            
+            # Check if processes are still running after init
+            running_count = 0
+            for server in self.mcp_servers:
+                if server["process"].poll() is None:
+                    running_count += 1
+                    print(f"✅ MCP {server['name']} running successfully")
+                else:
+                    print(f"⚠️ MCP {server['name']} exited during initialization")
+            
+            print(f"✅ {running_count}/{started_count} MCP servers are ready")
         
         return started_count > 0
     
@@ -276,28 +291,16 @@ class SubprocessA2AServers:
             "info_pid": self.info_process.pid if self.info_process else None
         }
 
-# FastAPI app
-app = FastAPI(title="Ohana Facebook Bot - MCP + A2A", version="1.0.0")
-
-# Facebook configuration
-VERIFY_TOKEN = os.getenv("FB_VERIFY_TOKEN", "ohana_verify_token_2025")
-PAGE_ACCESS_TOKEN = os.getenv("FB_PAGE_ACCESS_TOKEN", "")
-
 # Global instances
 mcp_manager = None
 subprocess_servers = None
 host_runtime = None
 user_sessions = {}
 
-def get_user_session(fb_user_id: str) -> str:
-    """Tạo hoặc lấy session cho Facebook user"""
-    if fb_user_id not in user_sessions:
-        user_sessions[fb_user_id] = f"fb-user-{fb_user_id}"
-    return user_sessions[fb_user_id]
-
-@app.on_event("startup")
-async def startup_event():
-    """Khởi động tất cả services theo thứ tự"""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler for FastAPI"""
+    # Startup
     global mcp_manager, subprocess_servers, host_runtime
     
     print("🚀 Starting Ohana Facebook Bot with MCP + A2A Architecture...")
@@ -343,6 +346,29 @@ async def startup_event():
     print(f"🧠 Host Agent: Connected with shared memory")
     print(f"📱 Facebook Webhook: Ready for integration")
     print("="*70)
+    
+    yield
+    
+    # Shutdown
+    print("\n🧹 Shutting down all services...")
+    cleanup_all_services()
+
+# FastAPI app with lifespan
+app = FastAPI(
+    title="Ohana Facebook Bot - MCP + A2A", 
+    version="1.0.0",
+    lifespan=lifespan
+)
+
+# Facebook configuration
+VERIFY_TOKEN = os.getenv("FB_VERIFY_TOKEN", "ohana_verify_token_2025")
+PAGE_ACCESS_TOKEN = os.getenv("FB_PAGE_ACCESS_TOKEN", "")
+
+def get_user_session(fb_user_id: str) -> str:
+    """Tạo hoặc lấy session cho Facebook user"""
+    if fb_user_id not in user_sessions:
+        user_sessions[fb_user_id] = f"fb-user-{fb_user_id}"
+    return user_sessions[fb_user_id]
 
 def cleanup_all_services():
     """Cleanup tất cả services khi thoát"""
@@ -447,14 +473,16 @@ async def process_with_host_agent(message: str, fb_user_id: str) -> Optional[str
     try:
         session_id = get_user_session(fb_user_id)
         
-        print(f"🤖 Processing via Host Agent:")
-        print(f"   Message: {message}")
-        print(f"   Session: {session_id}")
+        # Tắt debug logs để clean output
+        # print(f"🤖 Processing via Host Agent:")
+        # print(f"   Message: {message}")
+        # print(f"   Session: {session_id}")
         
         shared_memory.get_or_create_session(message)
         response = await host_runtime.ask(message, session_id=session_id)
         
-        print(f"🤖 Host Agent response: {response}")
+        # Chỉ in response cuối cùng
+        print(f"📤 Final Response: {response}")
         return response
         
     except Exception as e:

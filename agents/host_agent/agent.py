@@ -16,8 +16,8 @@ from google.genai import types as gt
 load_dotenv()
 
 # ====== Config ======
-BOOKING_URL = os.getenv("BOOKING_AGENT_URL", "http://localhost:9999")
-INFO_URL    = os.getenv("INFO_AGENT_URL",    "http://localhost:10002")
+BOOKING_URL = os.getenv("BOOKING_AGENT_URL", "http://booking-agent.railway.internal")
+INFO_URL = os.getenv("INFO_AGENT_URL", "http://info-agent.railway.internal")
 
 AGENT_MAP = {
     "Ohana Booking Agent": BOOKING_URL,
