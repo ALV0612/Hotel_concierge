@@ -17,8 +17,22 @@ from google.genai import types as gt
 load_dotenv()
 
 # ====== Config ======
-BOOKING_URL = os.getenv("BOOKING_AGENT_URL", "http://localhost:9999")
-INFO_URL    = os.getenv("INFO_AGENT_URL",    "http://localhost:10002")
+os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
+os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
+
+def _normalize_local_url(url: str) -> str:
+    """Đổi localhost -> 127.0.0.1 và đảm bảo có dấu '/' ở cuối để post vào root."""
+    if not url:
+        return url
+    url = url.replace("http://localhost", "http://127.0.0.1") \
+             .replace("https://localhost", "https://127.0.0.1")
+    if not url.endswith("/"):
+        url += "/"
+    return url
+
+# ====== Config ======
+BOOKING_URL = _normalize_local_url(os.getenv("BOOKING_AGENT_URL", "http://127.0.0.1:9999"))
+INFO_URL    = _normalize_local_url(os.getenv("INFO_AGENT_URL",    "http://127.0.0.1:10002"))
 
 AGENT_MAP = {
     "Ohana Booking Agent": BOOKING_URL,
