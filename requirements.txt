@@ -12,3 +12,4 @@ langgraph-checkpoint-sqlite
 aiosqlite
 nest-asyncio
 langchain_google_genai
+langchain_huggingface
