@@ -3,6 +3,8 @@ uvicorn
 requests
 python-dotenv
 httpx
-git+https://github.com/google/adk-python.git@main
 google-genai
 a2a-sdk
+langgraph
+crewai
+google-adk
