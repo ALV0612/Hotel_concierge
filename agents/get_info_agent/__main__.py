@@ -4,29 +4,46 @@ from a2a.server.apps import A2AStarletteApplication
 from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
-
 from agents.get_info_agent.agent_executor import GetInfoAgentExecutor
 from dotenv import load_dotenv
+
 load_dotenv()
+
+def pick_port() -> int:
+    """
+    - Khi chạy dưới Host: dùng INFO_PORT (mặc định 10002), KHÔNG dùng $PORT.
+    - Khi chạy độc lập (STANDALONE=1): cho phép dùng $PORT để test ngoài.
+    """
+    if os.getenv("STANDALONE", "0") == "1":
+        p = int(os.getenv("PORT", "10002"))
+    else:
+        p = int(os.getenv("INFO_PORT", "10002"))
+
+    if not (0 < p < 65536):
+        raise ValueError(f"Invalid port {p}. Use 1–65535.")
+
+    # Tránh xung đột với Host khi không ở chế độ standalone
+    if os.getenv("STANDALONE", "0") != "1" and str(p) == os.getenv("PORT", ""):
+        raise RuntimeError(f"INFO_PORT ({p}) trùng với $PORT của Host. Hãy đặt INFO_PORT khác.")
+
+    return p
+
 def main():
-    # Dùng env hoặc mặc định 10001
-    try:
-        PORT = int(os.getenv("INFO_PORT", "10002"))
-    except ValueError:
-        PORT = 10002
-    if not (0 < PORT < 65536):
-        raise ValueError(f"Invalid port {PORT}. Use 1-65535.")
+    PORT = pick_port()
+    BIND = os.getenv("INFO_BIND", "127.0.0.1")  # loopback để chỉ nội bộ container truy cập
+    # URL hiển thị trên AgentCard (tránh localhost để né proxy/IPv6)
+    card_url = os.getenv("INFO_CARD_URL", f"http://127.0.0.1:{PORT}/")
 
     skills = [
         AgentSkill(
             id="ohana.getinfo",
             name="Ohana: Booking + Docs",
             description="Đặt phòng; hỏi nội quy/dịch vụ (RAG) qua MCP",
-            tags=["booking","hotel","rag","mcp","gemini"],
+            tags=["booking", "hotel", "rag", "mcp", "gemini"],
             examples=[
                 "Đặt OH203 ngày mai cho 2 người",
                 "Nội quy hút thuốc là gì?",
-                "Check-out mấy giờ?"
+                "Check-out mấy giờ?",
             ],
         )
     ]
@@ -34,7 +51,7 @@ def main():
     card = AgentCard(
         name="Ohana GetInfo Agent",
         description="Concierge: booking + policy/docs via RAG (Gemini 2.5 + MCP)",
-        url=f"http://localhost:{PORT}/",              # 🔹 khớp đúng với cổng server
+        url=card_url,
         defaultInputModes=["text"],
         defaultOutputModes=["text"],
         skills=skills,
@@ -52,7 +69,15 @@ def main():
         agent_card=card,
     )
 
-    uvicorn.run(app.build(), host="0.0.0.0", port=PORT)
+    print("\n" + "=" * 60)
+    print("  Ohana GetInfo Agent (A2A)")
+    print("=" * 60)
+    print(f"📍 Server:   http://{BIND}:{PORT}/")
+    print(f"🔗 Card URL: {card_url}")
+    print("Ready for AgentCard integration!")
+    print("=" * 60 + "\n")
+
+    uvicorn.run(app.build(), host=BIND, port=PORT)
 
 if __name__ == "__main__":
     main()
