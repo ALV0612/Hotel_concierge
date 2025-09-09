@@ -5,7 +5,7 @@ import time
 import signal
 import atexit
 from fastapi import FastAPI, Request, HTTPException
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 import json
 from datetime import datetime
 import requests
@@ -16,8 +16,97 @@ from agents.host_agent.agent import HostRuntime, shared_memory
 
 load_dotenv()
 
+class MCPServerManager:
+    """Quản lý MCP servers"""
+    
+    def __init__(self):
+        self.mcp_servers = []
+        
+    def start_mcp_server(self, script_path: str, server_name: str):
+        """Start một MCP server"""
+        try:
+            print(f"🔌 Starting MCP server: {server_name}")
+            
+            process = subprocess.Popen([
+                "python", script_path
+            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            
+            self.mcp_servers.append({
+                "name": server_name,
+                "process": process,
+                "script_path": script_path,
+                "pid": process.pid
+            })
+            
+            print(f"✅ MCP {server_name} started with PID: {process.pid}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ Error starting MCP {server_name}: {e}")
+            return False
+    
+    def start_all_mcp_servers(self):
+        """Start tất cả MCP servers"""
+        print("🔌 Starting MCP servers...")
+        
+        mcp_configs = [
+            {"script": "mcp_server/server_booking_mcp.py", "name": "Booking MCP"},
+            {"script": "mcp_server/server_info_mcp.py", "name": "Info MCP"}
+        ]
+        
+        started_count = 0
+        for config in mcp_configs:
+            if os.path.exists(config["script"]):
+                if self.start_mcp_server(config["script"], config["name"]):
+                    started_count += 1
+            else:
+                print(f"⚠️ MCP script not found: {config['script']}")
+        
+        # Đợi MCP servers khởi động
+        if started_count > 0:
+            print(f"⏳ Waiting for {started_count} MCP servers to initialize...")
+            time.sleep(3)  # MCP servers thường start nhanh hơn A2A servers
+            print(f"✅ MCP servers should be ready")
+        
+        return started_count > 0
+    
+    def cleanup_mcp_servers(self):
+        """Cleanup MCP servers khi thoát"""
+        if self.mcp_servers:
+            print("\n🧹 Cleaning up MCP servers...")
+            
+            for server in self.mcp_servers:
+                try:
+                    server["process"].terminate()
+                    server["process"].wait(timeout=5)
+                    print(f"✅ MCP {server['name']} stopped")
+                except:
+                    try:
+                        server["process"].kill()
+                        print(f"🔪 MCP {server['name']} killed")
+                    except:
+                        pass
+    
+    def get_mcp_status(self):
+        """Lấy status của MCP servers"""
+        status = {}
+        for server in self.mcp_servers:
+            if server["process"].poll() is None:  # Still running
+                status[server["name"]] = {
+                    "status": "running",
+                    "pid": server["pid"],
+                    "script": server["script_path"]
+                }
+            else:
+                status[server["name"]] = {
+                    "status": "stopped",
+                    "pid": server["pid"],
+                    "script": server["script_path"]
+                }
+        return status
+
 class SubprocessA2AServers:
-    """Chạy booking và info agents như subprocess riêng biệt"""
+    """Quản lý A2A agent servers"""
     
     def __init__(self):
         self.booking_port = 9999
@@ -25,56 +114,48 @@ class SubprocessA2AServers:
         self.booking_process = None
         self.info_process = None
         self.servers_ready = False
-        
-        # Register cleanup on exit
-        atexit.register(self.cleanup)
 
     def start_booking_agent(self):
         """Chạy Booking Agent như subprocess"""
         try:
-            print(f"Starting Booking Agent subprocess on port {self.booking_port}")
+            print(f"🤖 Starting Booking Agent subprocess on port {self.booking_port}")
             
-            # Set environment variables for subprocess
             env = os.environ.copy()
             env["BOOKING_PORT"] = str(self.booking_port)
             
-            # Start subprocess
             self.booking_process = subprocess.Popen([
                 "python", "-m", "agents.booking_agent.__main__"
             ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             
-            print(f"Booking Agent subprocess started with PID: {self.booking_process.pid}")
+            print(f"✅ Booking Agent subprocess started with PID: {self.booking_process.pid}")
             return True
             
         except Exception as e:
-            print(f"Error starting Booking Agent subprocess: {e}")
+            print(f"❌ Error starting Booking Agent subprocess: {e}")
             return False
 
     def start_info_agent(self):
         """Chạy Info Agent như subprocess"""
         try:
-            print(f"Starting Info Agent subprocess on port {self.info_port}")
+            print(f"🤖 Starting Info Agent subprocess on port {self.info_port}")
             
-            # Set environment variables for subprocess
             env = os.environ.copy()
             env["INFO_PORT"] = str(self.info_port)
             
-            # Start subprocess
             self.info_process = subprocess.Popen([
                 "python", "-m", "agents.get_info_agent.__main__"
             ], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             
-            print(f"Info Agent subprocess started with PID: {self.info_process.pid}")
+            print(f"✅ Info Agent subprocess started with PID: {self.info_process.pid}")
             return True
             
         except Exception as e:
-            print(f"Error starting Info Agent subprocess: {e}")
+            print(f"❌ Error starting Info Agent subprocess: {e}")
             return False
 
     def check_server_health(self, url, timeout=3):
         """Kiểm tra server health"""
         try:
-            # Try different endpoints
             endpoints = ["/", "/.well-known/agent"]
             for endpoint in endpoints:
                 try:
@@ -88,57 +169,50 @@ class SubprocessA2AServers:
             return False
 
     def wait_for_servers(self, max_wait=60):
-        """Đợi servers sẵn sàng"""
-        print(f"Waiting for subprocess servers to be ready (max {max_wait}s)...")
+        """Đợi A2A servers sẵn sàng"""
+        print(f"⏳ Waiting for A2A subprocess servers to be ready (max {max_wait}s)...")
         start_time = time.time()
         
         booking_ready = False
         info_ready = False
         
         while time.time() - start_time < max_wait:
-            # Check booking agent
             if not booking_ready:
                 booking_ready = self.check_server_health(f"http://localhost:{self.booking_port}")
                 if booking_ready:
                     print("✅ Booking Agent subprocess ready")
             
-            # Check info agent  
             if not info_ready:
                 info_ready = self.check_server_health(f"http://localhost:{self.info_port}")
                 if info_ready:
                     print("✅ Info Agent subprocess ready")
             
-            # Both ready?
             if booking_ready and info_ready:
                 self.servers_ready = True
-                print("✅ All subprocess A2A servers are ready!")
+                print("✅ All A2A subprocess servers are ready!")
                 return True
             
             time.sleep(2)
         
-        print("⚠️ Warning: Some subprocess servers may not be ready yet")
-        print(f"   Booking Agent: {'✅' if booking_ready else '❌'}")
-        print(f"   Info Agent: {'✅' if info_ready else '❌'}")
-        
-        return booking_ready or info_ready  # At least one working
+        print("⚠️ Warning: Some A2A subprocess servers may not be ready yet")
+        return booking_ready or info_ready
 
     def start_all(self):
-        """Khởi động tất cả subprocess servers"""
-        print("Starting subprocess A2A servers...")
+        """Khởi động tất cả A2A subprocess servers"""
+        print("🤖 Starting A2A subprocess servers...")
         
         booking_started = self.start_booking_agent()
         info_started = self.start_info_agent()
         
         if not (booking_started and info_started):
-            print("❌ Failed to start some subprocess servers")
+            print("❌ Failed to start some A2A subprocess servers")
             return False
         
-        # Wait for servers to be ready
         return self.wait_for_servers()
 
     def cleanup(self):
-        """Cleanup subprocess khi thoát"""
-        print("\n🧹 Cleaning up subprocess servers...")
+        """Cleanup A2A subprocess khi thoát"""
+        print("\n🧹 Cleaning up A2A subprocess servers...")
         
         if self.booking_process:
             try:
@@ -165,18 +239,18 @@ class SubprocessA2AServers:
                     pass
 
     def get_status(self):
-        """Lấy status của các subprocess"""
+        """Lấy status của A2A subprocess"""
         booking_status = "stopped"
         info_status = "stopped"
         
         if self.booking_process:
-            if self.booking_process.poll() is None:  # Still running
+            if self.booking_process.poll() is None:
                 booking_status = "running" if self.check_server_health(f"http://localhost:{self.booking_port}") else "starting"
             else:
                 booking_status = "crashed"
         
         if self.info_process:
-            if self.info_process.poll() is None:  # Still running
+            if self.info_process.poll() is None:
                 info_status = "running" if self.check_server_health(f"http://localhost:{self.info_port}") else "starting"
             else:
                 info_status = "crashed"
@@ -189,13 +263,14 @@ class SubprocessA2AServers:
         }
 
 # FastAPI app
-app = FastAPI(title="Ohana Facebook Bot - Subprocess A2A", version="1.0.0")
+app = FastAPI(title="Ohana Facebook Bot - MCP + A2A", version="1.0.0")
 
 # Facebook configuration
 VERIFY_TOKEN = os.getenv("FB_VERIFY_TOKEN", "ohana_verify_token_2025")
 PAGE_ACCESS_TOKEN = os.getenv("FB_PAGE_ACCESS_TOKEN", "")
 
 # Global instances
+mcp_manager = None
 subprocess_servers = None
 host_runtime = None
 user_sessions = {}
@@ -208,43 +283,78 @@ def get_user_session(fb_user_id: str) -> str:
 
 @app.on_event("startup")
 async def startup_event():
-    """Khởi động subprocess servers khi FastAPI start"""
-    global subprocess_servers, host_runtime
+    """Khởi động tất cả services theo thứ tự"""
+    global mcp_manager, subprocess_servers, host_runtime
     
-    print("🚀 Starting Ohana Facebook Bot with Subprocess A2A...")
+    print("🚀 Starting Ohana Facebook Bot with MCP + A2A Architecture...")
+    print("="*70)
     
-    # Start subprocess A2A servers
-    subprocess_servers = SubprocessA2AServers()
-    servers_ready = subprocess_servers.start_all()
+    # Step 1: Start MCP servers first
+    print("STEP 1: Starting MCP servers...")
+    mcp_manager = MCPServerManager()
+    mcp_started = mcp_manager.start_all_mcp_servers()
     
-    if servers_ready:
-        print("✅ Subprocess servers ready")
+    if mcp_started:
+        print("✅ MCP servers started successfully")
     else:
-        print("⚠️ Some subprocess servers may not be ready")
+        print("⚠️ No MCP servers found or failed to start")
     
-    # Initialize host runtime
+    # Step 2: Start A2A subprocess servers
+    print("\nSTEP 2: Starting A2A subprocess servers...")
+    subprocess_servers = SubprocessA2AServers()
+    a2a_ready = subprocess_servers.start_all()
+    
+    if a2a_ready:
+        print("✅ A2A subprocess servers ready")
+    else:
+        print("⚠️ Some A2A subprocess servers may not be ready")
+    
+    # Step 3: Initialize host runtime
+    print("\nSTEP 3: Initializing Host Agent runtime...")
     os.environ["BOOKING_AGENT_URL"] = f"http://localhost:{subprocess_servers.booking_port}"
     os.environ["INFO_AGENT_URL"] = f"http://localhost:{subprocess_servers.info_port}"
     
     host_runtime = HostRuntime()
     print("✅ Host Agent runtime initialized")
     
-    print(f"🎯 Main API ready on port 8000 (only exposed port)")
-    print(f"🔧 Subprocess Booking Agent: localhost:{subprocess_servers.booking_port}")
-    print(f"🔧 Subprocess Info Agent: localhost:{subprocess_servers.info_port}")
+    # Register cleanup handlers
+    atexit.register(cleanup_all_services)
+    
+    print("\n" + "="*70)
+    print("🎯 OHANA FACEBOOK BOT - FULLY OPERATIONAL")
+    print("="*70)
+    print(f"📡 Main API: http://localhost:8000 (exposed)")
+    print(f"🔌 MCP Servers: {len(mcp_manager.mcp_servers)} running")
+    print(f"🤖 A2A Agents: booking@{subprocess_servers.booking_port}, info@{subprocess_servers.info_port}")
+    print(f"🧠 Host Agent: Connected with shared memory")
+    print(f"📱 Facebook Webhook: Ready for integration")
+    print("="*70)
+
+def cleanup_all_services():
+    """Cleanup tất cả services khi thoát"""
+    global mcp_manager, subprocess_servers
+    
+    if mcp_manager:
+        mcp_manager.cleanup_mcp_servers()
+    
+    if subprocess_servers:
+        subprocess_servers.cleanup()
 
 @app.get("/")
 async def root():
     """API status endpoint"""
     return {
-        "message": "Ohana Facebook Bot - Subprocess A2A Architecture", 
+        "message": "Ohana Facebook Bot - MCP + A2A Architecture", 
         "status": "running",
         "timestamp": datetime.now().isoformat(),
-        "architecture": "subprocess_a2a_servers",
+        "architecture": "mcp_servers + subprocess_a2a_servers",
         "exposed_port": "8000_only",
-        "subprocess_agents": {
-            "booking": f"localhost:{subprocess_servers.booking_port if subprocess_servers else 'starting'}",
-            "info": f"localhost:{subprocess_servers.info_port if subprocess_servers else 'starting'}"
+        "components": {
+            "mcp_servers": len(mcp_manager.mcp_servers) if mcp_manager else 0,
+            "a2a_agents": {
+                "booking": f"localhost:{subprocess_servers.booking_port}" if subprocess_servers else "not_started",
+                "info": f"localhost:{subprocess_servers.info_port}" if subprocess_servers else "not_started"
+            }
         },
         "agent_cards": "preserved",
         "protocol": "A2A_compliant"
@@ -390,26 +500,40 @@ async def send_facebook_message(recipient_id: str, message_text: str):
 
 @app.get("/health")
 async def health_check():
-    """Health check với thông tin chi tiết"""
+    """Health check với thông tin chi tiết tất cả components"""
     try:
-        subprocess_status = subprocess_servers.get_status() if subprocess_servers else {}
+        # MCP servers status
+        mcp_status = mcp_manager.get_mcp_status() if mcp_manager else {}
+        
+        # A2A subprocess status
+        a2a_status = subprocess_servers.get_status() if subprocess_servers else {}
+        
+        # Host agent status
         host_status = "connected" if host_runtime else "not_initialized"
+        
+        # Shared memory status
         memory_stats = shared_memory.get_session_stats() if shared_memory.current_session else {}
         
         return {
             "status": "healthy",
             "timestamp": datetime.now().isoformat(),
-            "architecture": "subprocess_a2a_servers",
-            "host_agent": host_status,
-            "subprocess_agents": subprocess_status,
-            "shared_memory": memory_stats,
+            "architecture": "mcp_servers + subprocess_a2a_servers",
+            "components": {
+                "mcp_servers": mcp_status,
+                "a2a_subprocess_agents": a2a_status,
+                "host_agent": host_status,
+                "shared_memory": memory_stats
+            },
             "active_sessions": len(user_sessions),
             "facebook_config": {
                 "verify_token": "configured" if VERIFY_TOKEN else "missing",
                 "page_token": "configured" if PAGE_ACCESS_TOKEN else "missing"
             },
-            "agent_cards": "preserved",
-            "protocol": "A2A_compliant"
+            "protocols": {
+                "mcp": "active",
+                "agent_cards": "preserved",
+                "a2a_protocol": "compliant"
+            }
         }
         
     except Exception as e:
@@ -435,19 +559,20 @@ async def test_chat(request: Request):
             "bot_response": response,
             "session_id": get_user_session(user_id),
             "timestamp": datetime.now().isoformat(),
-            "architecture": "subprocess_a2a_with_agent_cards"
+            "architecture": "mcp + subprocess_a2a_with_agent_cards"
         }
         
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
-    print("🚀 Starting Ohana Facebook Bot with Subprocess A2A Servers...")
-    print(f"   Architecture: Subprocess A2A with AgentCard Protocol")
+    print("🚀 Starting Ohana Facebook Bot with MCP + A2A Servers...")
+    print(f"   Architecture: MCP Servers + Subprocess A2A with AgentCard Protocol")
     print(f"   Verify Token: {'✅ Set' if VERIFY_TOKEN else '❌ Missing'}")
     print(f"   Page Token: {'✅ Set' if PAGE_ACCESS_TOKEN else '❌ Missing'}")
     print(f"   Exposed Port: 8000 (only)")
-    print(f"   Subprocess Agents: Will start on localhost:9999, localhost:10002")
+    print(f"   MCP Servers: Auto-start server_booking_mcp.py, server_info_mcp.py")
+    print(f"   A2A Agents: Auto-start on localhost:9999, localhost:10002")
     
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
