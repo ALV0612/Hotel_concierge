@@ -27,9 +27,23 @@ class MCPServerManager:
         try:
             print(f"🔌 Starting MCP server: {server_name}")
             
+            # Get directory of script for proper working directory
+            script_dir = os.path.dirname(script_path)
+            script_name = os.path.basename(script_path)
+            
+            # Set up environment
+            env = os.environ.copy()
+            env['PYTHONPATH'] = os.getcwd() + os.pathsep + env.get('PYTHONPATH', '')
+            
             process = subprocess.Popen([
-                "python", script_path
-            ], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                "python", script_name  # Use just filename, not full path
+            ], 
+            stdout=subprocess.PIPE, 
+            stderr=subprocess.PIPE, 
+            text=True,
+            env=env,
+            cwd=script_dir if script_dir else os.getcwd()  # Run from script's directory
+            )
             
             self.mcp_servers.append({
                 "name": server_name,
