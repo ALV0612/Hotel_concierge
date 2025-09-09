@@ -6,56 +6,68 @@ from dotenv import load_dotenv
 load_dotenv()
 
 def start_booking_agent():
-    # Đảm bảo sub-agent nghe trên localhost:9999 (nội bộ)
-    env = os.environ.copy()
-    env["PORT"] = "9999"  # nếu __main__ của agent đọc PORT
-    # Hoặc nếu agent đọc biến riêng thì đặt BOOKING_AGENT_PORT=...
+    # Không cần env PORT nữa vì không phải web service
     subprocess.Popen(
         [sys.executable, "-u", "-X", "utf8", "-m", "agents.booking_agent"],
-        env=env,
         cwd=os.getcwd(),
     )
 
 def start_info_agent():
-    env = os.environ.copy()
-    env["PORT"] = "10002"
+    # Không cần env PORT nữa
     subprocess.Popen(
         [sys.executable, "-u", "-X", "utf8", "-m", "agents.get_info_agent"],
-        env=env,
         cwd=os.getcwd(),
     )
 
 def start_host_agent():
     from railwaymain import app
-    port = int(os.getenv("PORT", "8000"))  # PORT do Railway cấp
+    port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port, workers=1)
 
 def wait_for_agents_ready():
-    import requests
-    for name, url in [("Booking", "http://127.0.0.1:9999"),
-                      ("GetInfo", "http://127.0.0.1:10002")]:
+    import socket
+    
+    def check_port(host, port, timeout=2):
+        """Check if port is open using socket connection"""
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            result = sock.connect_ex((host, port))
+            sock.close()
+            return result == 0
+        except Exception:
+            return False
+    
+    # Wait for agents to be ready by checking if ports are listening
+    for name, port in [("Booking", 9999), ("GetInfo", 10002)]:
         for i in range(30):
-            try:
-                r = requests.get(f"{url}/health", timeout=2)
-                if r.status_code == 200:
-                    print(f"✅ {name} ready at {url}")
-                    break
-            except Exception:
-                print(f"⏳ Waiting for {name}... ({i+1}/30)")
-                time.sleep(1)
+            if check_port("127.0.0.1", port):
+                print(f"✅ {name} ready on port {port}")
+                break
+            print(f"⏳ Waiting for {name}... ({i+1}/30)")
+            time.sleep(1)
         else:
             print(f"⚠️ {name} not ready, continuing...")
 
+# Alternative: Skip health checks entirely and just wait
+def simple_wait():
+    print("⏳ Giving agents time to start...")
+    time.sleep(5)  # Simple wait instead of health checks
+    print("✅ Proceeding with host agent startup")
+
 if __name__ == "__main__":
     print("🚀 Starting Ohana Multi-Agent System on Railway...")
-    # Host public URL sẽ là $PORT; sub-agents chỉ nội bộ
+    
     os.environ["BOOKING_AGENT_URL"] = "http://127.0.0.1:9999"
-    os.environ["INFO_AGENT_URL"]    = "http://127.0.0.1:10002"
+    os.environ["INFO_AGENT_URL"] = "http://127.0.0.1:10002"
 
-    # chạy sub-agents
+    # Start sub-agents
     Process(target=start_booking_agent, daemon=True).start()
     Process(target=start_info_agent, daemon=True).start()
 
-    wait_for_agents_ready()
+    # Choose one of these approaches:
+    # wait_for_agents_ready()  # Port-based check
+    simple_wait()              # Simple time-based wait
+    
     print("🎯 Starting Host Agent...")
     start_host_agent()
