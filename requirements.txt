@@ -3,6 +3,12 @@ uvicorn
 requests
 python-dotenv
 httpx
-git+https://github.com/google/adk-python.git@main
 google-genai
-python-a2a
+a2a-sdk
+langgraph
+crewai
+google-adk
+langgraph-checkpoint-sqlite
+aiosqlite
+nest-asyncio
+langchain_google_genai
