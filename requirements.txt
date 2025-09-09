@@ -5,3 +5,4 @@ python-dotenv
 httpx
 git+https://github.com/google/adk-python.git@main
 google-genai
+python-a2a
