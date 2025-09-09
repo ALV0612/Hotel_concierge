@@ -4,13 +4,13 @@ import subprocess
 import time
 import signal
 import atexit
-from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
 from typing import Dict, Any, Optional, List
 import json
 from datetime import datetime
 import requests
 from dotenv import load_dotenv
+from contextlib import asynccontextmanager
 
 # Host agent
 from agents.host_agent.agent import HostRuntime, shared_memory
@@ -32,22 +32,18 @@ class MCPServerManager:
             script_dir = os.path.dirname(script_path)
             script_name = os.path.basename(script_path)
             
-            # Set up environment with UTF-8 support
+            # Set up environment
             env = os.environ.copy()
             env['PYTHONPATH'] = os.getcwd() + os.pathsep + env.get('PYTHONPATH', '')
-            env['PYTHONIOENCODING'] = 'utf-8'
-            env['PYTHONUTF8'] = '1'
             
             process = subprocess.Popen([
-                "python", "-X", "utf8", script_name
+                "python", script_name  # Use just filename, not full path
             ], 
             stdout=subprocess.PIPE, 
             stderr=subprocess.PIPE, 
             text=True,
             env=env,
-            cwd=script_dir if script_dir else os.getcwd(),
-            encoding='utf-8',
-            errors='replace'
+            cwd=script_dir if script_dir else os.getcwd()  # Run from script's directory
             )
             
             self.mcp_servers.append({
@@ -81,21 +77,11 @@ class MCPServerManager:
             else:
                 print(f"⚠️ MCP script not found: {config['script']}")
         
-        # Đợi MCP servers khởi động với better health check
+        # Đợi MCP servers khởi động
         if started_count > 0:
             print(f"⏳ Waiting for {started_count} MCP servers to initialize...")
-            time.sleep(5)  # Tăng wait time để handle Unicode init
-            
-            # Check if processes are still running after init
-            running_count = 0
-            for server in self.mcp_servers:
-                if server["process"].poll() is None:
-                    running_count += 1
-                    print(f"✅ MCP {server['name']} running successfully")
-                else:
-                    print(f"⚠️ MCP {server['name']} exited during initialization")
-            
-            print(f"✅ {running_count}/{started_count} MCP servers are ready")
+            time.sleep(3)  # MCP servers thường start nhanh hơn A2A servers
+            print(f"✅ MCP servers should be ready")
         
         return started_count > 0
     
@@ -290,53 +276,33 @@ class SubprocessA2AServers:
             "booking_pid": self.booking_process.pid if self.booking_process else None,
             "info_pid": self.info_process.pid if self.info_process else None
         }
-
-# Global instances
-mcp_manager = None
-subprocess_servers = None
-host_runtime = None
-user_sessions = {}
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Lifespan event handler for FastAPI"""
-    # Startup
+    """Khởi động & dọn dẹp tất cả services đúng chuẩn FastAPI lifespan."""
     global mcp_manager, subprocess_servers, host_runtime
-    
+
     print("🚀 Starting Ohana Facebook Bot with MCP + A2A Architecture...")
     print("="*70)
-    
-    # Step 1: Start MCP servers first
+
+    # STEP 1: MCP servers
     print("STEP 1: Starting MCP servers...")
     mcp_manager = MCPServerManager()
     mcp_started = mcp_manager.start_all_mcp_servers()
-    
-    if mcp_started:
-        print("✅ MCP servers started successfully")
-    else:
-        print("⚠️ No MCP servers found or failed to start")
-    
-    # Step 2: Start A2A subprocess servers
+    print("✅ MCP servers started successfully" if mcp_started else "⚠️ No MCP servers found or failed to start")
+
+    # STEP 2: A2A subprocess servers
     print("\nSTEP 2: Starting A2A subprocess servers...")
     subprocess_servers = SubprocessA2AServers()
     a2a_ready = subprocess_servers.start_all()
-    
-    if a2a_ready:
-        print("✅ A2A subprocess servers ready")
-    else:
-        print("⚠️ Some A2A subprocess servers may not be ready")
-    
-    # Step 3: Initialize host runtime
+    print("✅ A2A subprocess servers ready" if a2a_ready else "⚠️ Some A2A subprocess servers may not be ready")
+
+    # STEP 3: Host runtime
     print("\nSTEP 3: Initializing Host Agent runtime...")
     os.environ["BOOKING_AGENT_URL"] = f"http://localhost:{subprocess_servers.booking_port}"
-    os.environ["INFO_AGENT_URL"] = f"http://localhost:{subprocess_servers.info_port}"
-    
+    os.environ["INFO_AGENT_URL"]    = f"http://localhost:{subprocess_servers.info_port}"
     host_runtime = HostRuntime()
     print("✅ Host Agent runtime initialized")
-    
-    # Register cleanup handlers
-    atexit.register(cleanup_all_services)
-    
+
     print("\n" + "="*70)
     print("🎯 OHANA FACEBOOK BOT - FULLY OPERATIONAL")
     print("="*70)
@@ -346,29 +312,36 @@ async def lifespan(app: FastAPI):
     print(f"🧠 Host Agent: Connected with shared memory")
     print(f"📱 Facebook Webhook: Ready for integration")
     print("="*70)
-    
-    yield
-    
-    # Shutdown
-    print("\n🧹 Shutting down all services...")
-    cleanup_all_services()
 
-# FastAPI app with lifespan
-app = FastAPI(
-    title="Ohana Facebook Bot - MCP + A2A", 
-    version="1.0.0",
-    lifespan=lifespan
-)
+    # Cho app chạy
+    try:
+        yield
+    finally:
+        # DỌN DẸP: gọi cleanup khi app shutdown
+        if mcp_manager:
+            mcp_manager.cleanup_mcp_servers()
+        if subprocess_servers:
+            subprocess_servers.cleanup()
+# FastAPI app
+app = FastAPI(title="Ohana Facebook Bot - MCP + A2A", version="1.0.0", lifespan=lifespan)
 
 # Facebook configuration
 VERIFY_TOKEN = os.getenv("FB_VERIFY_TOKEN", "ohana_verify_token_2025")
 PAGE_ACCESS_TOKEN = os.getenv("FB_PAGE_ACCESS_TOKEN", "")
+
+# Global instances
+mcp_manager = None
+subprocess_servers = None
+host_runtime = None
+user_sessions = {}
 
 def get_user_session(fb_user_id: str) -> str:
     """Tạo hoặc lấy session cho Facebook user"""
     if fb_user_id not in user_sessions:
         user_sessions[fb_user_id] = f"fb-user-{fb_user_id}"
     return user_sessions[fb_user_id]
+
+
 
 def cleanup_all_services():
     """Cleanup tất cả services khi thoát"""
@@ -400,20 +373,17 @@ async def root():
         "protocol": "A2A_compliant"
     }
 
+from fastapi.responses import PlainTextResponse
+
 @app.get("/webhook")
 async def verify_webhook(request: Request):
-    """Facebook webhook verification"""
     try:
         verify_token = request.query_params.get('hub.verify_token')
-        challenge = request.query_params.get('hub.challenge')
-        
+        challenge = request.query_params.get('hub.challenge') or ""
         if verify_token == VERIFY_TOKEN:
             print("✅ Webhook verification successful!")
-            return int(challenge)
-        else:
-            print("❌ Invalid verification token")
-            raise HTTPException(status_code=403, detail="Invalid verify token")
-            
+            return PlainTextResponse(challenge)   # Facebook cần plain text
+        raise HTTPException(status_code=403, detail="Invalid verify token")
     except Exception as e:
         print(f"❌ Webhook verification error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
@@ -473,16 +443,14 @@ async def process_with_host_agent(message: str, fb_user_id: str) -> Optional[str
     try:
         session_id = get_user_session(fb_user_id)
         
-        # Tắt debug logs để clean output
-        # print(f"🤖 Processing via Host Agent:")
-        # print(f"   Message: {message}")
-        # print(f"   Session: {session_id}")
+        print(f"🤖 Processing via Host Agent:")
+        print(f"   Message: {message}")
+        print(f"   Session: {session_id}")
         
         shared_memory.get_or_create_session(message)
         response = await host_runtime.ask(message, session_id=session_id)
         
-        # Chỉ in response cuối cùng
-        print(f"📤 Final Response: {response}")
+        print(f"🤖 Host Agent response: {response}")
         return response
         
     except Exception as e:
