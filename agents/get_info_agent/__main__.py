@@ -5,7 +5,7 @@ from a2a.server.request_handlers import DefaultRequestHandler
 from a2a.server.tasks import InMemoryTaskStore
 from a2a.types import AgentCapabilities, AgentCard, AgentSkill
 
-from agent_executor import GetInfoAgentExecutor
+from agents.get_info_agent.agent_executor import GetInfoAgentExecutor
 from dotenv import load_dotenv
 load_dotenv()
 def main():

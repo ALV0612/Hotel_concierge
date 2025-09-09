@@ -13,7 +13,7 @@ try:
 except Exception:
     TextPart = object  # fallback
 
-from agent import BookingAgent
+from agents.booking_agent.agent import BookingAgent
 
 logger = logging.getLogger(__name__)
 

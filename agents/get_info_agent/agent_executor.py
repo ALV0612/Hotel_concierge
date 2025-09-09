@@ -10,7 +10,7 @@ from a2a.server.events import EventQueue
 from a2a.utils import new_agent_text_message
 
 # CrewAI Agent (đồng bộ)
-from agent import GetInfoAgentCrew as GetInfoAgent
+from agents.get_info_agent.agent import GetInfoAgentCrew as GetInfoAgent
 
 from dotenv import load_dotenv
 load_dotenv()
