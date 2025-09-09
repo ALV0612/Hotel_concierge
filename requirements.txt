@@ -8,3 +8,6 @@ a2a-sdk
 langgraph
 crewai
 google-adk
+langgraph-checkpoint-sqlite
+aiosqlite
+nest-asyncio
