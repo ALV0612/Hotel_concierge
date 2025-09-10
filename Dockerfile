@@ -10,21 +10,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && apt-get clean
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Install only essential packages (NO EMBEDDING MODELS)
-RUN pip install --no-cache-dir \
-    fastmcp \
-    gspread \
-    google-auth \
-    python-dotenv \
-    fastapi \
-    uvicorn \
-    requests
-
 # Copy application files
 COPY . .
 
