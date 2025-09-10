@@ -53,215 +53,53 @@ def _parse_room_hint(text: Optional[str]) -> tuple[Optional[str], Optional[int]]
 
 import os, json, base64
 
-import os
-import json
-import base64
-from typing import List, Optional
-from google.oauth2.service_account import Credentials
-
-def load_sa_credentials(scopes: Optional[List[str]] = None) -> Credentials:
+def load_sa_credentials(scopes: List[str] = None) -> Credentials:
     """
-    Load Google Service Account credentials from multiple sources.
-    
-    Priority order:
-    1. GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON string or base64 encoded)
-    2. GOOGLE_SERVICE_ACCOUNT_FILE (file path OR raw JSON content)
-    3. GOOGLE_APPLICATION_CREDENTIALS (standard Google SDK path)
-    
-    Args:
-        scopes: List of OAuth scopes. Defaults to Sheets and Drive access.
-        
-    Returns:
-        Credentials: Google service account credentials
-        
-    Raises:
-        RuntimeError: If no valid credentials found or invalid format
+    Hỗ trợ: FILE PATH / RAW JSON / BASE64 JSON.
+    Ưu tiên:
+      1) GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON hoặc base64)
+      2) GOOGLE_SERVICE_ACCOUNT_FILE (file path)
+      3) GOOGLE_APPLICATION_CREDENTIALS (path chuẩn của Google SDK)
     """
-    
-    # Default scopes if none provided
+    # Default scopes nếu không được cung cấp
     if scopes is None:
         scopes = [
             'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive',
-            'https://www.googleapis.com/auth/drive.file'
+            'https://www.googleapis.com/auth/drive'
         ]
     
-    # Try different environment variables in priority order
-    credential_sources = [
-        ("GOOGLE_SERVICE_ACCOUNT_JSON", "JSON content or base64"),
-        ("GOOGLE_SERVICE_ACCOUNT_FILE", "file path or JSON content"), 
-        ("GOOGLE_APPLICATION_CREDENTIALS", "file path")
-    ]
+    raw = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # ← Sửa: thêm _JSON
+        or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    )
     
-    for env_var, description in credential_sources:
-        raw_value = os.getenv(env_var)
-        if not raw_value:
-            continue
-            
-        raw_value = raw_value.strip()
-        print(f"🔍 Trying {env_var} ({description})")
-        
-        try:
-            # Method 1: Direct JSON content
-            if raw_value.startswith("{") and raw_value.endswith("}"):
-                print("📄 Detected JSON content")
-                try:
-                    info = json.loads(raw_value)
-                    credentials = Credentials.from_service_account_info(info, scopes=scopes)
-                    print(f"✅ Successfully loaded credentials from {env_var} (JSON content)")
-                    return credentials
-                except json.JSONDecodeError as e:
-                    print(f"❌ Invalid JSON format: {e}")
-                    continue
-            
-            # Method 2: Base64 encoded JSON
-            try:
-                decoded = base64.b64decode(raw_value).decode("utf-8")
-                if decoded.strip().startswith("{") and decoded.strip().endswith("}"):
-                    print("🔐 Detected base64 encoded JSON")
-                    info = json.loads(decoded)
-                    credentials = Credentials.from_service_account_info(info, scopes=scopes)
-                    print(f"✅ Successfully loaded credentials from {env_var} (base64 JSON)")
-                    return credentials
-            except Exception:
-                # Not base64 or invalid base64, continue to file path check
-                pass
-            
-            # Method 3: File path
-            if os.path.exists(raw_value):
-                print(f"📁 Detected file path: {raw_value}")
-                try:
-                    credentials = Credentials.from_service_account_file(raw_value, scopes=scopes)
-                    print(f"✅ Successfully loaded credentials from {env_var} (file path)")
-                    return credentials
-                except Exception as e:
-                    print(f"❌ Failed to load from file {raw_value}: {e}")
-                    continue
-            else:
-                print(f"❌ File not found: {raw_value}")
-                
-        except Exception as e:
-            print(f"❌ Error processing {env_var}: {e}")
-            continue
-    
-    # If we get here, no valid credentials found
-    available_vars = [var for var, _ in credential_sources if os.getenv(var)]
-    if available_vars:
-        raise RuntimeError(
-            f"Found environment variables {available_vars} but could not load valid "
-            f"service account credentials. Please check the format (JSON content, "
-            f"base64 encoded JSON, or valid file path)."
-        )
-    else:
-        raise RuntimeError(
-            "No service account credentials found. Please set one of: "
-            "GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_FILE, "
-            "or GOOGLE_APPLICATION_CREDENTIALS"
-        )
-import json
-import base64
-from typing import List, Optional
-from google.oauth2.service_account import Credentials
+    if not raw:
+        raise RuntimeError("Missing service account credentials (JSON or file path).")
 
-def load_sa_credentials(scopes: Optional[List[str]] = None) -> Credentials:
-    """
-    Load Google Service Account credentials from multiple sources.
-    
-    Priority order:
-    1. GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON string or base64 encoded)
-    2. GOOGLE_SERVICE_ACCOUNT_FILE (file path OR raw JSON content)
-    3. GOOGLE_APPLICATION_CREDENTIALS (standard Google SDK path)
-    
-    Args:
-        scopes: List of OAuth scopes. Defaults to Sheets and Drive access.
-        
-    Returns:
-        Credentials: Google service account credentials
-        
-    Raises:
-        RuntimeError: If no valid credentials found or invalid format
-    """
-    
-    # Default scopes if none provided
-    if scopes is None:
-        scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive',
-            'https://www.googleapis.com/auth/drive.file'
-        ]
-    
-    # Try different environment variables in priority order
-    credential_sources = [
-        ("GOOGLE_SERVICE_ACCOUNT_JSON", "JSON content or base64"),
-        ("GOOGLE_SERVICE_ACCOUNT_FILE", "file path or JSON content"), 
-        ("GOOGLE_APPLICATION_CREDENTIALS", "file path")
-    ]
-    
-    for env_var, description in credential_sources:
-        raw_value = os.getenv(env_var)
-        if not raw_value:
-            continue
-            
-        raw_value = raw_value.strip()
-        print(f"🔍 Trying {env_var} ({description})")
-        
+    raw = raw.strip()
+
+    # (1) Nếu là JSON trực tiếp
+    if raw.startswith("{"):
         try:
-            # Method 1: Direct JSON content
-            if raw_value.startswith("{") and raw_value.endswith("}"):
-                print("📄 Detected JSON content")
-                try:
-                    info = json.loads(raw_value)
-                    credentials = Credentials.from_service_account_info(info, scopes=scopes)
-                    print(f"✅ Successfully loaded credentials from {env_var} (JSON content)")
-                    return credentials
-                except json.JSONDecodeError as e:
-                    print(f"❌ Invalid JSON format: {e}")
-                    continue
-            
-            # Method 2: Base64 encoded JSON
-            try:
-                decoded = base64.b64decode(raw_value).decode("utf-8")
-                if decoded.strip().startswith("{") and decoded.strip().endswith("}"):
-                    print("🔐 Detected base64 encoded JSON")
-                    info = json.loads(decoded)
-                    credentials = Credentials.from_service_account_info(info, scopes=scopes)
-                    print(f"✅ Successfully loaded credentials from {env_var} (base64 JSON)")
-                    return credentials
-            except Exception:
-                # Not base64 or invalid base64, continue to file path check
-                pass
-            
-            # Method 3: File path
-            if os.path.exists(raw_value):
-                print(f"📁 Detected file path: {raw_value}")
-                try:
-                    credentials = Credentials.from_service_account_file(raw_value, scopes=scopes)
-                    print(f"✅ Successfully loaded credentials from {env_var} (file path)")
-                    return credentials
-                except Exception as e:
-                    print(f"❌ Failed to load from file {raw_value}: {e}")
-                    continue
-            else:
-                print(f"❌ File not found: {raw_value}")
-                
+            info = json.loads(raw)
+            return Credentials.from_service_account_info(info, scopes=scopes)  # ← Sửa: scopes
         except Exception as e:
-            print(f"❌ Error processing {env_var}: {e}")
-            continue
-    
-    # If we get here, no valid credentials found
-    available_vars = [var for var, _ in credential_sources if os.getenv(var)]
-    if available_vars:
-        raise RuntimeError(
-            f"Found environment variables {available_vars} but could not load valid "
-            f"service account credentials. Please check the format (JSON content, "
-            f"base64 encoded JSON, or valid file path)."
-        )
-    else:
-        raise RuntimeError(
-            "No service account credentials found. Please set one of: "
-            "GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_SERVICE_ACCOUNT_FILE, "
-            "or GOOGLE_APPLICATION_CREDENTIALS"
-        )
+            raise RuntimeError(f"Invalid inline JSON for service account: {e}")
+
+    # (2) Nếu là BASE64 của JSON
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        if decoded.strip().startswith("{"):
+            info = json.loads(decoded)
+            return Credentials.from_service_account_info(info, scopes=scopes)  # ← Sửa: scopes
+    except Exception:
+        pass  # không phải base64 → thử như file path
+
+    # (3) Xử lý như FILE PATH
+    if not os.path.exists(raw):
+        raise RuntimeError(f"Service account file not found: {raw}")
+    return Credentials.from_service_account_file(raw, scopes=scopes)  # ← Sửa: scopes
 
 # --- Khởi tạo FastMCP ---
 mcp = fastmcp.FastMCP("Ohana Hotel Booking")
