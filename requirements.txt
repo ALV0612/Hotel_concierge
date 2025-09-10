@@ -16,3 +16,4 @@ langchain_huggingface
 gspread
 fastmcp
 langchain_text_splitters
+langchain_community
