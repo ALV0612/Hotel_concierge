@@ -77,7 +77,7 @@ class MCPServerManager:
 
         if started_count > 0:
             print(f"⏳ Waiting for {started_count} MCP servers to initialize...")
-            time.sleep(3)
+            time.sleep(5)  # Tăng từ 3s lên 5s cho Railway
             print(f"✅ MCP servers should be ready")
 
         return started_count > 0
@@ -163,7 +163,7 @@ class SubprocessA2AServers:
             print(f"❌ Error starting Info Agent subprocess: {e}")
             return False
 
-    def check_server_health(self, url, timeout=3):
+    def check_server_health(self, url, timeout=5):  # Tăng timeout từ 3s lên 5s
         """Kiểm tra server health (bỏ proxy để gọi loopback)"""
         try:
             endpoints = ["/", "/.well-known/agent", "/health"]
@@ -182,7 +182,7 @@ class SubprocessA2AServers:
         except Exception:
             return False
 
-    def wait_for_servers(self, max_wait=60):
+    def wait_for_servers(self, max_wait=300):  # Tăng từ 60s lên 300s cho Railway
         """Đợi A2A servers sẵn sàng"""
         print(f"⏳ Waiting for A2A subprocess servers to be ready (max {max_wait}s)...")
         start_time = time.time()
@@ -208,7 +208,7 @@ class SubprocessA2AServers:
                 print("✅ All A2A subprocess servers are ready!")
                 return True
 
-            time.sleep(2)
+            time.sleep(3)  # Tăng từ 2s lên 3s cho Railway
 
         print("⚠️ Warning: Some A2A subprocess servers may not be ready yet")
         return booking_ready or info_ready
@@ -362,6 +362,42 @@ async def root():
         "protocol": "A2A_compliant"
     }
 
+@app.get("/health")
+async def health_check():
+    """Health check với thông tin chi tiết tất cả components - Railway friendly"""
+    try:
+        mcp_status = mcp_manager.get_mcp_status() if mcp_manager else {}
+        a2a_status = subprocess_servers.get_status() if subprocess_servers else {}
+        host_status = "connected" if host_runtime else "not_initialized"
+        memory_stats = shared_memory.get_session_stats() if shared_memory.current_session else {}
+
+        return {
+            "status": "healthy",
+            "timestamp": datetime.now().isoformat(),
+            "railway_optimized": True,
+            "startup_timeout": "300s",
+            "architecture": "mcp_servers + subprocess_a2a_servers",
+            "components": {
+                "mcp_servers": mcp_status,
+                "a2a_subprocess_agents": a2a_status,
+                "host_agent": host_status,
+                "shared_memory": memory_stats
+            },
+            "active_sessions": len(user_sessions),
+            "facebook_config": {
+                "verify_token": "configured" if VERIFY_TOKEN else "missing",
+                "page_token": "configured" if PAGE_ACCESS_TOKEN else "missing"
+            },
+            "protocols": {
+                "mcp": "active",
+                "agent_cards": "preserved",
+                "a2a_protocol": "compliant"
+            }
+        }
+
+    except Exception as e:
+        return {"status": "error", "error": str(e), "railway_optimized": True}
+
 @app.get("/webhook")
 async def verify_webhook(request: Request):
     """Facebook webhook verification"""
@@ -468,40 +504,6 @@ async def send_facebook_message(recipient_id: str, message_text: str):
         except Exception as e:
             print(f"❌ Error sending message {i+1} to Facebook: {e}")
 
-@app.get("/health")
-async def health_check():
-    """Health check với thông tin chi tiết tất cả components"""
-    try:
-        mcp_status = mcp_manager.get_mcp_status() if mcp_manager else {}
-        a2a_status = subprocess_servers.get_status() if subprocess_servers else {}
-        host_status = "connected" if host_runtime else "not_initialized"
-        memory_stats = shared_memory.get_session_stats() if shared_memory.current_session else {}
-
-        return {
-            "status": "healthy",
-            "timestamp": datetime.now().isoformat(),
-            "architecture": "mcp_servers + subprocess_a2a_servers",
-            "components": {
-                "mcp_servers": mcp_status,
-                "a2a_subprocess_agents": a2a_status,
-                "host_agent": host_status,
-                "shared_memory": memory_stats
-            },
-            "active_sessions": len(user_sessions),
-            "facebook_config": {
-                "verify_token": "configured" if VERIFY_TOKEN else "missing",
-                "page_token": "configured" if PAGE_ACCESS_TOKEN else "missing"
-            },
-            "protocols": {
-                "mcp": "active",
-                "agent_cards": "preserved",
-                "a2a_protocol": "compliant"
-            }
-        }
-
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
 @app.post("/test-chat")
 async def test_chat(request: Request):
     """Test endpoint"""
@@ -533,4 +535,5 @@ if __name__ == "__main__":
 
     port = int(os.getenv("PORT", "8000"))
     print(f"   Exposed Port: {port} (public)")
+    print(f"   Railway Optimized: ✅ 300s timeout, pre-cached models")
     uvicorn.run(app, host="0.0.0.0", port=port)
