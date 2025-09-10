@@ -53,7 +53,7 @@ def _parse_room_hint(text: Optional[str]) -> tuple[Optional[str], Optional[int]]
 
 import os, json, base64
 
-def load_sa_credentials(scopes: List[str] = None) -> Credentials:
+def load_sa_credentials(scopes):
     """
     Hỗ trợ: FILE PATH / RAW JSON / BASE64 JSON.
     Ưu tiên:
