@@ -53,7 +53,7 @@ def _parse_room_hint(text: Optional[str]) -> tuple[Optional[str], Optional[int]]
 
 import os, json, base64
 
-def load_sa_credentials(scopes):
+def load_sa_credentials(scopes: List[str] = None) -> Credentials:
     """
     Hỗ trợ: FILE PATH / RAW JSON / BASE64 JSON.
     Ưu tiên:
@@ -100,7 +100,7 @@ SHEET_ID = os.environ["OHANA_SHEET_ID"]
 CREDS_FILE = os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"]
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-creds = Credentials.load_sa_credentials(SCOPES)
+creds = load_sa_credentials(SCOPES)
 gc = gspread.authorize(creds)
 
 sh = gc.open_by_key(SHEET_ID)
