@@ -57,15 +57,23 @@ def load_sa_credentials(scopes: List[str] = None) -> Credentials:
     """
     Hỗ trợ: FILE PATH / RAW JSON / BASE64 JSON.
     Ưu tiên:
-      1) GOOGLE_SERVICE_ACCOUNT_JSON
-      2) GOOGLE_SERVICE_ACCOUNT_FILE
+      1) GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON hoặc base64)
+      2) GOOGLE_SERVICE_ACCOUNT_FILE (file path)
       3) GOOGLE_APPLICATION_CREDENTIALS (path chuẩn của Google SDK)
     """
+    # Default scopes nếu không được cung cấp
+    if scopes is None:
+        scopes = [
+            'https://www.googleapis.com/auth/spreadsheets',
+            'https://www.googleapis.com/auth/drive'
+        ]
+    
     raw = (
-        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # ← Sửa: thêm _JSON
         or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
         or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
     )
+    
     if not raw:
         raise RuntimeError("Missing service account credentials (JSON or file path).")
 
@@ -75,7 +83,7 @@ def load_sa_credentials(scopes: List[str] = None) -> Credentials:
     if raw.startswith("{"):
         try:
             info = json.loads(raw)
-            return Credentials.from_service_account_info(info, scopes=SCOPES)
+            return Credentials.from_service_account_info(info, scopes=scopes)  # ← Sửa: scopes
         except Exception as e:
             raise RuntimeError(f"Invalid inline JSON for service account: {e}")
 
@@ -84,14 +92,14 @@ def load_sa_credentials(scopes: List[str] = None) -> Credentials:
         decoded = base64.b64decode(raw).decode("utf-8")
         if decoded.strip().startswith("{"):
             info = json.loads(decoded)
-            return Credentials.from_service_account_info(info, scopes=SCOPES)
+            return Credentials.from_service_account_info(info, scopes=scopes)  # ← Sửa: scopes
     except Exception:
         pass  # không phải base64 → thử như file path
 
     # (3) Xử lý như FILE PATH
     if not os.path.exists(raw):
         raise RuntimeError(f"Service account file not found: {raw}")
-    return Credentials.from_service_account_file(raw, scopes=SCOPES)
+    return Credentials.from_service_account_file(raw, scopes=scopes)  # ← Sửa: scopes
 
 # --- Khởi tạo FastMCP ---
 mcp = fastmcp.FastMCP("Ohana Hotel Booking")
