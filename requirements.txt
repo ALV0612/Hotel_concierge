@@ -14,3 +14,4 @@ nest-asyncio
 langchain_google_genai
 langchain_huggingface
 gspread
+fastmcp
