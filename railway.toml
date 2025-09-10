@@ -2,10 +2,37 @@
 builder = "dockerfile"
 
 [deploy]
-startCommand = "python server_booking_mcp.py"
+startCommand = "python main.py"
 healthcheckPath = "/health"
 healthcheckTimeout = 300
 restartPolicyType = "on_failure"
 
 [env]
+# Railway deployment settings
 RAILWAY_STARTUP_TIMEOUT = "300"
+
+# Facebook configuration
+FB_VERIFY_TOKEN = ""
+FB_PAGE_ACCESS_TOKEN = ""
+
+# Google Sheets and API configuration  
+OHANA_SHEET_ID = ""
+GOOGLE_SERVICE_ACCOUNT_FILE = ""
+GOOGLE_API_KEY = ""
+
+# Port configuration (Railway will override this)
+PORT = "8000"
+BOOKING_PORT = "9999"
+INFO_PORT = "10002"
+
+# Bind configuration for PaaS
+BOOKING_BIND = "127.0.0.1"
+INFO_BIND = "127.0.0.1"
+
+# Python optimization
+PYTHONUNBUFFERED = "1"
+PYTHONDONTWRITEBYTECODE = "1"
+
+# Transformers cache
+TRANSFORMERS_CACHE = "/tmp/transformers_cache"
+HF_HOME = "/tmp/huggingface"
