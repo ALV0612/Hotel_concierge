@@ -3,7 +3,8 @@
     "data.pdf"
   ],
   "pdf_folder": "C:\\Desktop\\test\\Data",
-  "total_chunks": 6,
-  "last_updated": "2025-09-03T21:03:19.013914",
-  "embedding_model": "all-MiniLM-L6-v2"
+  "total_chunks": 12,
+  "last_updated": "2025-09-11T01:39:50.340812",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "folder_path": "./Data"
 }
