@@ -51,6 +51,48 @@ def _parse_room_hint(text: Optional[str]) -> tuple[Optional[str], Optional[int]]
 
     return None, None
 
+import os, json, base64
+
+def load_sa_credentials(scopes: List[str] = None) -> Credentials:
+    """
+    Hỗ trợ: FILE PATH / RAW JSON / BASE64 JSON.
+    Ưu tiên:
+      1) GOOGLE_SERVICE_ACCOUNT_JSON
+      2) GOOGLE_SERVICE_ACCOUNT_FILE
+      3) GOOGLE_APPLICATION_CREDENTIALS (path chuẩn của Google SDK)
+    """
+    raw = (
+        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+        or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
+        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    )
+    if not raw:
+        raise RuntimeError("Missing service account credentials (JSON or file path).")
+
+    raw = raw.strip()
+
+    # (1) Nếu là JSON trực tiếp
+    if raw.startswith("{"):
+        try:
+            info = json.loads(raw)
+            return Credentials.from_service_account_info(info, scopes=SCOPES)
+        except Exception as e:
+            raise RuntimeError(f"Invalid inline JSON for service account: {e}")
+
+    # (2) Nếu là BASE64 của JSON
+    try:
+        decoded = base64.b64decode(raw).decode("utf-8")
+        if decoded.strip().startswith("{"):
+            info = json.loads(decoded)
+            return Credentials.from_service_account_info(info, scopes=SCOPES)
+    except Exception:
+        pass  # không phải base64 → thử như file path
+
+    # (3) Xử lý như FILE PATH
+    if not os.path.exists(raw):
+        raise RuntimeError(f"Service account file not found: {raw}")
+    return Credentials.from_service_account_file(raw, scopes=SCOPES)
+
 # --- Khởi tạo FastMCP ---
 mcp = fastmcp.FastMCP("Ohana Hotel Booking")
 
@@ -58,7 +100,7 @@ SHEET_ID = os.environ["OHANA_SHEET_ID"]
 CREDS_FILE = os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"]
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
+creds = Credentials.load_sa_credentials(SCOPES)
 gc = gspread.authorize(creds)
 
 sh = gc.open_by_key(SHEET_ID)
