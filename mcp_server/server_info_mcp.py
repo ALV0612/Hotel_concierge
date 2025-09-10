@@ -256,15 +256,15 @@ def query_hotel_docs(question: str, top_k: int = 3) -> List[Dict]:
     """Tìm kiếm thông tin trong tài liệu khách sạn"""
     return hotel_rag.query(question, k=top_k)
 
-@mcp.tool()
-def setup_hotel_documents(txt_folder: str = None, pdf_folder: str = None) -> Dict:
-    """Setup tài liệu khách sạn từ thư mục TXT hoặc PDF"""
-    results = {}
-    if txt_folder:
-        results["txt"] = hotel_rag.create_db_from_txt_folder(txt_folder)
-    if pdf_folder:
-        results["pdf"] = hotel_rag.create_db_from_pdf_folder(pdf_folder)
-    return results
+# @mcp.tool()
+# def setup_hotel_documents(txt_folder: str = None, pdf_folder: str = None) -> Dict:
+#     """Setup tài liệu khách sạn từ thư mục TXT hoặc PDF"""
+#     results = {}
+#     if txt_folder:
+#         results["txt"] = hotel_rag.create_db_from_txt_folder(txt_folder)
+#     if pdf_folder:
+#         results["pdf"] = hotel_rag.create_db_from_pdf_folder(pdf_folder)
+#     return results
 
 @mcp.tool()
 def hotel_rag_summary() -> Dict:
