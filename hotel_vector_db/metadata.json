@@ -1,0 +1,9 @@
+{
+  "processed_files": [
+    "data.pdf"
+  ],
+  "pdf_folder": "C:\\Desktop\\test\\Data",
+  "total_chunks": 6,
+  "last_updated": "2025-09-03T21:03:19.013914",
+  "embedding_model": "all-MiniLM-L6-v2"
+}
