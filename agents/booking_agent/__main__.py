@@ -25,7 +25,7 @@ def pick_port() -> int:
 
 def main():
     PORT = pick_port()
-    BIND = os.getenv("BOOKING_BIND", "127.0.0.1")  # bind loopback để nội bộ thôi
+    BIND = os.getenv("BOOKING_BIND", "localhost")  # đổi từ 127.0.0.1 thành localhost
 
     skills = [AgentSkill(
         id="ohana.booking",
@@ -38,7 +38,7 @@ def main():
         ],
     )]
 
-    card_url = os.getenv("BOOKING_CARD_URL", f"http://127.0.0.1:{PORT}/")  # tránh localhost
+    card_url = os.getenv("BOOKING_CARD_URL", f"http://localhost:{PORT}/")  # đổi từ 127.0.0.1 thành localhost
     card = AgentCard(
         name="Ohana Booking Agent",
         description="Booking workflow (LangGraph + Gemini)",

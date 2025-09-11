@@ -21,18 +21,17 @@ os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
 os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
 
 def _normalize_local_url(url: str) -> str:
-    """Đổi localhost -> 127.0.0.1 và đảm bảo có dấu '/' ở cuối để post vào root."""
+    """Giữ nguyên localhost và đảm bảo có dấu '/' ở cuối để post vào root."""
     if not url:
         return url
-    url = url.replace("http://localhost", "http://127.0.0.1") \
-             .replace("https://localhost", "https://127.0.0.1")
+    # Không cần đổi localhost -> 127.0.0.1 nữa, giữ nguyên localhost
     if not url.endswith("/"):
         url += "/"
     return url
 
 # ====== Config ======
-BOOKING_URL = _normalize_local_url(os.getenv("BOOKING_AGENT_URL", "http://127.0.0.1:9999"))
-INFO_URL    = _normalize_local_url(os.getenv("INFO_AGENT_URL",    "http://127.0.0.1:10002"))
+BOOKING_URL = "http://localhost:9999"
+INFO_URL    = "http://localhost:10002"
 
 AGENT_MAP = {
     "Ohana Booking Agent": BOOKING_URL,
@@ -174,20 +173,29 @@ class SharedMemoryService:
         print(f"📋 Updated booking context: {list(context.keys())}")
 
     def get_full_context_summary(self) -> str:
-        """Tóm tắt bối cảnh đầy đủ của cuộc trò chuyện hiện tại."""
-        recent = self.get_recent_context(5)
+        """Tóm tắt ngắn gọn - CHỈ DÙNG NỘI BỘ, KHÔNG GỬI ĐI."""
+        recent = self.get_recent_context(2)  # CHỈ 2 tin nhắn gần nhất
         summary = ""
 
         if recent:
-            summary = "Lịch sử cuộc trò chuyện gần đây:\n"
+            summary = "Recent:\n"
             for msg in recent:
-                user_msg = msg['user_message'][:50] + "..." if len(msg['user_message']) > 50 else msg['user_message']
-                agent_resp = msg['agent_response'][:100] + "..." if len(msg['agent_response']) > 100 else msg['agent_response']
-                summary += f"- {msg['agent']}: {user_msg} → {agent_resp}\n"
+                # Cắt ngắn hơn nữa
+                user_msg = msg['user_message'][:30] + "..." if len(msg['user_message']) > 30 else msg['user_message']
+                summary += f"- {msg['agent']}: {user_msg}\n"
 
-        if self.booking_context:
-            summary += f"\nThông tin đặt phòng hiện tại: {json.dumps(self.booking_context, ensure_ascii=False)}\n"
+        # Chỉ lưu thông tin quan trọng nhất
+        if self.booking_context and self.booking_context.get('last_room_query'):
+            lrq = self.booking_context['last_room_query']
+            summary += f"\nBooking: {lrq.get('guests')}p"
+            if lrq.get('check_in'): 
+                summary += f", {lrq.get('check_in')}"
+            summary += "\n"
 
+        # GIỚI HẠN TỔNG CHIỀU DÀI
+        if len(summary) > 200:
+            summary = summary[:200] + "..."
+        
         return summary
 
     def start_new_booking(self) -> str:
@@ -273,6 +281,38 @@ async def _send_tasks(base_url: str, text: str, session_id: str) -> str:
 
 async def _send_message(base_url: str, text: str, session_id: str) -> str:
     print(f"DEBUG _send_message: sessionId being sent: {session_id}")
+    
+    # CLEAN TEXT - remove context wrapper if present
+    clean_text = text
+    
+    # Remove context wrapper nếu có
+    if "Context cuộc trò chuyện:" in text:
+        lines = text.split('\n')
+        in_new_section = False
+        clean_lines = []
+        
+        for line in lines:
+            if line.startswith("Yêu cầu mới:") or line.startswith("Câu hỏi:"):
+                in_new_section = True
+                # Bỏ prefix "Yêu cầu mới:" hoặc "Câu hỏi:"
+                clean_line = line.split(":", 1)[-1].strip()
+                if clean_line:
+                    clean_lines.append(clean_line)
+            elif in_new_section:
+                clean_lines.append(line)
+        
+        if clean_lines:
+            clean_text = '\n'.join(clean_lines).strip()
+    
+    # Truncate nếu vẫn quá dài (backup safety)
+    MAX_MESSAGE_LENGTH = 500  # Conservative limit
+    if len(clean_text) > MAX_MESSAGE_LENGTH:
+        clean_text = clean_text[:MAX_MESSAGE_LENGTH] + "..."
+        print(f"WARNING: Message truncated to {MAX_MESSAGE_LENGTH} chars")
+    
+    print(f"DEBUG: Original text length: {len(text)}")
+    print(f"DEBUG: Clean text length: {len(clean_text)}")
+    print(f"DEBUG: Clean text preview: {clean_text[:100]}...")
 
     payload = {
         "jsonrpc": "2.0",
@@ -281,21 +321,20 @@ async def _send_message(base_url: str, text: str, session_id: str) -> str:
         "params": {
             "message": {
                 "role": "user",
-                "parts": [{"kind": "text", "text": text}],
+                "parts": [{"kind": "text", "text": clean_text}],  # CHỈ GỬI CLEAN TEXT
                 "messageId": uuid.uuid4().hex,
             },
-            "sessionId": session_id,  # QUAN TRỌNG: đảm bảo key đúng
+            "sessionId": session_id,
         },
     }
 
-    print(f"DEBUG _send_message: Full payload: {json.dumps(payload, indent=2, ensure_ascii=False)}")
+    print(f"DEBUG _send_message: Clean payload size: {len(json.dumps(payload))} chars")
 
     data = await _post_jsonrpc(base_url, payload)
     parts = (data.get("result") or {}).get("parts") or []
     if parts and isinstance(parts[0], dict):
         return parts[0].get("text", "")
     return ""
-
 async def _call_a2a(base_url: str, query: str, session_id: str, agent_name: str = "") -> str:
     print(f"DEBUG _call_a2a: Called with session_id: {session_id}")
     print(f"DEBUG _call_a2a: Query: {query}")
@@ -331,12 +370,11 @@ async def query_rooms(
     check_out: Optional[str] = None,
     tool_context: ToolContext = None,
 ) -> str:
-    """Hỏi GetInfo Agent về phòng trống (có truyền context từ shared memory)."""
+    """Hỏi GetInfo Agent về phòng trống - CHỈ GỬI QUERY THUẦN."""
     session_id = shared_memory.get_or_create_session()
     info_url = AGENT_MAP["Ohana GetInfo Agent"]
 
-    context_summary = shared_memory.get_full_context_summary()
-
+    # Tạo question thuần túy, KHÔNG có context wrapper
     question = f"Tôi cần tìm phòng cho {guests} người"
     if check_in and check_out:
         question += f" từ ngày {check_in} đến {check_out}"
@@ -344,9 +382,9 @@ async def query_rooms(
         question += f" từ ngày {check_in}"
     question += ". Bạn có thể cho tôi biết những phòng nào còn trống không?"
 
-    if context_summary.strip():
-        question = f"Context cuộc trò chuyện:\n{context_summary}\n\nYêu cầu mới: {question}"
+    print(f"DEBUG: Sending clean question: {question}")
 
+    # GỬI MESSAGE THUẦN - Backend agent sẽ tự load context từ session
     response = await _call_a2a(info_url, question, session_id, "GetInfo Agent")
 
     # Lưu lại để handoff sang Booking
@@ -365,17 +403,15 @@ async def book_room(
     room_selection: str,
     tool_context: ToolContext = None,
 ) -> str:
+    """Đặt phòng - CHỈ GỬI ROOM SELECTION THUẦN."""
     session_id = shared_memory.get_or_create_session()
-    print(f"DEBUG: Using FIXED session for book_room: {session_id}")
+    print(f"DEBUG: Using session for book_room: {session_id}")
 
     booking_url = AGENT_MAP["Ohana Booking Agent"]
 
-    # Đưa context vào message để sub-agent parse dễ hơn
-    context_summary = shared_memory.get_full_context_summary()
-    message = room_selection
-    if context_summary.strip():
-        message = f"Context cuộc trò chuyện:\n{context_summary}\n\n{room_selection}"
-
+    # CLEAN message - chỉ gửi room selection
+    clean_message = room_selection.strip()
+    
     # Chuẩn hóa ngày DD/MM/YYYY → YYYY-MM-DD
     import re
     def convert_date(text: str) -> str:
@@ -385,18 +421,24 @@ async def book_room(
             return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
         return re.sub(pattern, repl, text)
 
-    message = convert_date(message)
+    clean_message = convert_date(clean_message)
+    print(f"DEBUG: Sending clean booking message: {clean_message}")
 
-    response = await _call_a2a(booking_url, message, session_id, "Booking Agent")
+    # GỬI MESSAGE THUẦN - Backend sẽ có context từ session
+    response = await _call_a2a(booking_url, clean_message, session_id, "Booking Agent")
     return response
 
 async def confirm_booking(
     confirmation: str,
     tool_context: ToolContext = None,
 ) -> str:
+    """Xác nhận đặt phòng - CHỈ GỬI CONFIRMATION THUẦN."""
     session_id = shared_memory.get_or_create_session()
     booking_url = AGENT_MAP["Ohana Booking Agent"]
 
+    # CLEAN confirmation
+    clean_confirmation = confirmation.strip()
+    
     # Chuẩn hóa ngày DD/MM/YYYY → YYYY-MM-DD
     import re
     def convert_date(text: str) -> str:
@@ -406,27 +448,25 @@ async def confirm_booking(
             return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
         return re.sub(pattern, repl, text)
 
-    confirmation = convert_date(confirmation)
-    print(f"DEBUG: Converted confirmation: {confirmation}")
+    clean_confirmation = convert_date(clean_confirmation)
+    print(f"DEBUG: Sending clean confirmation: {clean_confirmation}")
 
-    response = await _call_a2a(booking_url, confirmation, session_id, "Booking Agent")
+    response = await _call_a2a(booking_url, clean_confirmation, session_id, "Booking Agent")
     return response
 
 async def ask_info_agent(
     question: str,
     tool_context: ToolContext = None,
 ) -> str:
-    """Hỏi GetInfo Agent với shared context."""
+    """Hỏi GetInfo Agent - CHỈ GỬI QUESTION THUẦN."""
     session_id = shared_memory.get_or_create_session()
     info_url = AGENT_MAP["Ohana GetInfo Agent"]
 
-    context_summary = shared_memory.get_full_context_summary()
-    if shared_memory.booking_context and any(word in question.lower() for word in ["phòng", "đặt", "booking", "check"]):
-        enhanced_question = f"Context cuộc trò chuyện:\n{context_summary}\n\nCâu hỏi: {question}"
-    else:
-        enhanced_question = question
+    # CLEAN question - không thêm context wrapper
+    clean_question = question.strip()
+    print(f"DEBUG: Sending clean question to InfoAgent: {clean_question}")
 
-    response = await _call_a2a(info_url, enhanced_question, session_id, "GetInfo Agent")
+    response = await _call_a2a(info_url, clean_question, session_id, "GetInfo Agent")
     return response
 
 # ====== Host Agent (ADK) ======

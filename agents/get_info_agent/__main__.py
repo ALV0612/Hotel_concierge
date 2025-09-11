@@ -30,9 +30,9 @@ def pick_port() -> int:
 
 def main():
     PORT = pick_port()
-    BIND = os.getenv("INFO_BIND", "127.0.0.1")  # loopback để chỉ nội bộ container truy cập
-    # URL hiển thị trên AgentCard (tránh localhost để né proxy/IPv6)
-    card_url = os.getenv("INFO_CARD_URL", f"http://127.0.0.1:{PORT}/")
+    BIND = os.getenv("INFO_BIND", "localhost")  # đổi từ 127.0.0.1 thành localhost
+    # URL hiển thị trên AgentCard (đổi từ 127.0.0.1 thành localhost)
+    card_url = os.getenv("INFO_CARD_URL", f"http://localhost:{PORT}/")
 
     skills = [
         AgentSkill(

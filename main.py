@@ -17,8 +17,8 @@ from agents.host_agent.agent import HostRuntime, shared_memory
 load_dotenv()
 
 # BỎ PROXY CHO LOOPBACK – quan trọng khi chạy trên PaaS
-os.environ.setdefault("NO_PROXY", "127.0.0.1,localhost")
-os.environ.setdefault("no_proxy", "127.0.0.1,localhost")
+os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1")
+os.environ.setdefault("no_proxy", "localhost,127.0.0.1")
 
 class MCPServerManager:
     """Quản lý MCP servers"""
@@ -131,7 +131,7 @@ class SubprocessA2AServers:
             print(f"🤖 Starting Booking Agent subprocess on port {self.booking_port}")
             env = os.environ.copy()
             env["BOOKING_PORT"] = str(self.booking_port)
-            env["BOOKING_BIND"] = env.get("BOOKING_BIND", "127.0.0.1")  # bind loopback
+            env["BOOKING_BIND"] = env.get("BOOKING_BIND", "localhost")  # đổi từ 127.0.0.1 thành localhost
 
             self.booking_process = subprocess.Popen(
                 [sys.executable, "-m", "agents.booking_agent.__main__"],
@@ -150,7 +150,7 @@ class SubprocessA2AServers:
             print(f"🤖 Starting Info Agent subprocess on port {self.info_port}")
             env = os.environ.copy()
             env["INFO_PORT"] = str(self.info_port)
-            env["INFO_BIND"] = env.get("INFO_BIND", "127.0.0.1")  # bind loopback
+            env["INFO_BIND"] = env.get("INFO_BIND", "localhost")  # đổi từ 127.0.0.1 thành localhost
 
             self.info_process = subprocess.Popen(
                 [sys.executable, "-m", "agents.get_info_agent.__main__"],
@@ -189,8 +189,8 @@ class SubprocessA2AServers:
 
         booking_ready = False
         info_ready = False
-        book_url = f"http://127.0.0.1:{self.booking_port}"
-        info_url = f"http://127.0.0.1:{self.info_port}"
+        book_url = f"http://localhost:{self.booking_port}"  # đổi từ 127.0.0.1 thành localhost
+        info_url = f"http://localhost:{self.info_port}"      # đổi từ 127.0.0.1 thành localhost
 
         while time.time() - start_time < max_wait:
             if not booking_ready:
@@ -254,8 +254,8 @@ class SubprocessA2AServers:
         """Lấy status của A2A subprocess"""
         booking_status = "stopped"
         info_status = "stopped"
-        book_url = f"http://127.0.0.1:{self.booking_port}"
-        info_url = f"http://127.0.0.1:{self.info_port}"
+        book_url = f"http://localhost:{self.booking_port}"  # đổi từ 127.0.0.1 thành localhost
+        info_url = f"http://localhost:{self.info_port}"      # đổi từ 127.0.0.1 thành localhost
 
         if self.booking_process:
             if self.booking_process.poll() is None:
@@ -310,9 +310,9 @@ async def lifespan(app: FastAPI):
 
     # STEP 3: Host runtime
     print("\nSTEP 3: Initializing Host Agent runtime...")
-    # Dùng 127.0.0.1 thay vì localhost
-    os.environ["BOOKING_AGENT_URL"] = f"http://127.0.0.1:{subprocess_servers.booking_port}"
-    os.environ["INFO_AGENT_URL"]    = f"http://127.0.0.1:{subprocess_servers.info_port}"
+    # Đổi từ 127.0.0.1 thành localhost
+    os.environ["BOOKING_AGENT_URL"] = f"http://localhost:{subprocess_servers.booking_port}"
+    os.environ["INFO_AGENT_URL"]    = f"http://localhost:{subprocess_servers.info_port}"
     host_runtime = HostRuntime()
     print("✅ Host Agent runtime initialized")
 
@@ -322,7 +322,7 @@ async def lifespan(app: FastAPI):
     print("="*70)
     print(f"📡 Main API: http://0.0.0.0:{port_print} (exposed)")
     print(f"🔌 MCP Servers: {len(mcp_manager.mcp_servers)} running")
-    print(f"🤖 A2A Agents: booking@127.0.0.1:{subprocess_servers.booking_port}, info@127.0.0.1:{subprocess_servers.info_port}")
+    print(f"🤖 A2A Agents: booking@localhost:{subprocess_servers.booking_port}, info@localhost:{subprocess_servers.info_port}")
     print(f"🧠 Host Agent: Connected with shared memory")
     print(f"📱 Facebook Webhook: Ready for integration")
     print("="*70)
@@ -354,8 +354,8 @@ async def root():
         "components": {
             "mcp_servers": len(mcp_manager.mcp_servers) if mcp_manager else 0,
             "a2a_agents": {
-                "booking": f"127.0.0.1:{subprocess_servers.booking_port}" if subprocess_servers else "not_started",
-                "info":    f"127.0.0.1:{subprocess_servers.info_port}" if subprocess_servers else "not_started",
+                "booking": f"localhost:{subprocess_servers.booking_port}" if subprocess_servers else "not_started",
+                "info":    f"localhost:{subprocess_servers.info_port}" if subprocess_servers else "not_started",
             }
         },
         "agent_cards": "preserved",
@@ -531,7 +531,7 @@ if __name__ == "__main__":
     print(f"   Verify Token: {'✅ Set' if VERIFY_TOKEN else '❌ Missing'}")
     print(f"   Page Token: {'✅ Set' if PAGE_ACCESS_TOKEN else '❌ Missing'}")
     print("   MCP Servers: Auto-start server_booking_mcp.py, server_info_mcp.py")
-    print("   A2A Agents: Auto-start on 127.0.0.1:9999, 127.0.0.1:10002")
+    print("   A2A Agents: Auto-start on localhost:9999, localhost:10002")
 
     port = int(os.getenv("PORT", "8000"))
     print(f"   Exposed Port: {port} (public)")
