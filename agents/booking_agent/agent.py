@@ -24,7 +24,8 @@ from mcp import ClientSession, StdioServerParameters, types
 from mcp.client.stdio import stdio_client
 
 from dotenv import load_dotenv
-load_dotenv()
+load_dotenv(".env")
+
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO)
@@ -281,7 +282,7 @@ class CreateBookingTool(MCPTool):
 # ===================== Workflow =====================
 class BookingWorkflow:
     def __init__(self, mcp_session: ClientSession, tools_cache_ref: Dict[str, set] | None = None):
-        self.llm = ChatGoogleGenerativeAI(model=MODEL, temperature=0.1, convert_system_message_to_human=True)
+        self.llm = ChatGoogleGenerativeAI(model=MODEL, temperature=0.2, convert_system_message_to_human=True)
         self.extract_llm = self.llm.with_structured_output(BookingInfo)
         self.tools = [CreateBookingTool(session=mcp_session)]
         self.context_parser = ContextParser()

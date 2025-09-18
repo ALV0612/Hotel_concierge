@@ -44,22 +44,37 @@ except Exception:
     pass
 
 # -------------------------
-# Enhanced Config with Context Awareness
+# Enhanced Config with Context Awareness - GPT-4 Mini
 # -------------------------
 TODAY = datetime.now().date()
 
 def _resolve_model_name() -> str:
-    # CrewAI expects provider/model
-    raw = os.getenv("OHANA_LLM_MODEL", "gemini/gemini-2.5-flash")
+    # Support both OpenAI and Gemini models
+    raw = os.getenv("OHANA_LLM_MODEL", "openai/gpt-4o-mini")
+    
+    # Handle OpenAI models
+    if raw.startswith("gpt-"):
+        return f"openai/{raw}"
+    elif raw.startswith("openai/"):
+        return raw
+    
+    # Handle Gemini models (fallback)
+    if raw.startswith("gemini"):
+        return f"gemini/{raw}" if "/" not in raw else raw
+    
+    # Default
     if "/" in raw:
         return raw
-    if raw.startswith("gemini"):
-        return f"gemini/{raw}"
-    return raw
+    
+    return f"openai/{raw}"
 
 MODEL = _resolve_model_name()
 
-# Map GOOGLE_API_KEY -> GEMINI_API_KEY
+# API Key mapping for GPT-4 Mini
+if not os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_KEY"):
+    os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_KEY")
+
+# Keep Gemini mapping for fallback
 if not os.getenv("GEMINI_API_KEY") and os.getenv("GOOGLE_API_KEY"):
     os.environ["GEMINI_API_KEY"] = os.getenv("GOOGLE_API_KEY")
 
@@ -409,10 +424,10 @@ def build_tools(client: MCPThreadedClient) -> List[BaseTool]:
     ]
 
 # -------------------------
-# Enhanced Agent wrapper (CrewAI) with Shared Memory Support
+# Enhanced Agent wrapper (CrewAI) with GPT-4 Mini Support
 # -------------------------
 class GetInfoAgentCrew:
-    """Enhanced CrewAI GetInfo Agent with shared memory awareness"""
+    """Enhanced CrewAI GetInfo Agent with GPT-4 Mini and shared memory awareness"""
 
     def __init__(self, session_name: str = "default") -> None:
         self.session_name = session_name
@@ -422,18 +437,19 @@ class GetInfoAgentCrew:
         self.context_extractor = ContextExtractor()
 
         self._agent = Agent(
-            role="Ohana Concierge with Shared Memory",
+            role="Ohana Concierge with Shared Memory (GPT-4 Mini)",
             goal=(
                 "Hiểu nhu cầu đặt phòng & câu hỏi về khách sạn với CONTEXT AWARENESS. "
                 f"Hôm nay: {TODAY.strftime('%Y-%m-%d')}. "
-                "Có thể nhận context từ Host Agent và xử lý thông minh."
+                "Có thể nhận context từ Host Agent và xử lý thông minh với GPT-4 Mini."
             ),
             backstory=(
-                "Bạn là trợ lý đặt phòng thông minh của khách sạn Ohana với khả năng: "
+                "Bạn là trợ lý đặt phòng thông minh của khách sạn Ohana sử dụng GPT-4 Mini với khả năng: "
                 "1) Xử lý context từ cuộc trò chuyện trước đó "
                 "2) Tự động trích xuất thông tin từ message phức tạp "
                 "3) Ưu tiên phòng có sức chứa CHÍNH XÁC theo yêu cầu "
-                "4) Kết hợp RAG để trả lời về nội quy/dịch vụ với context."
+                "4) Kết hợp RAG để trả lời về nội quy/dịch vụ với context. "
+                "5) Tận dụng khả năng reasoning mạnh mẽ của GPT-4 Mini."
             ),
             llm=self.llm,
             verbose=False,
@@ -444,7 +460,7 @@ class GetInfoAgentCrew:
             description=(
                 "Người dùng nhắn: '{user_input}'.\n"
                 "Lịch sử (shared memory context):\n{history}\n\n"
-                "NHIỆM VỤ NÂNG CAO:\n"
+                "NHIỆM VỤ NÂNG CAO (GPT-4 Mini Enhanced):\n"
                 "1) CONTEXT AWARENESS: Phân tích message để tìm context từ Host Agent\n"
                 "   - Tìm thông tin: số khách, ngày tháng, loại phòng\n"
                 "   - Tự động điền context vào tools khi cần\n"
@@ -455,10 +471,11 @@ class GetInfoAgentCrew:
                 "     • Ưu tiên phòng có capacity CHÍNH XÁC\n"
                 "     • CHỈ hiển thị capacity +1 khi HẾT phòng đúng size\n"
                 "4) Nếu (B): ưu tiên 'query_hotel_docs' với enhanced context\n"
-                "5) SMART RESPONSE: Tận dụng context để trả lời thông minh\n\n"
-                "ĐẦU RA: Trả lời ngắn gọn, tiếng Việt, context-aware."
+                "5) SMART RESPONSE: Tận dụng GPT-4 Mini reasoning để trả lời thông minh\n"
+                "6) ADVANCED REASONING: Sử dụng khả năng suy luận của GPT-4 Mini cho các câu hỏi phức tạp\n\n"
+                "ĐẦU RA: Trả lời ngắn gọn, tiếng Việt, context-aware với reasoning chính xác."
             ),
-            expected_output="Câu trả lời cuối cùng (tiếng Việt), tận dụng shared memory context.",
+            expected_output="Câu trả lời cuối cùng (tiếng Việt), tận dụng GPT-4 Mini reasoning và shared memory context.",
             agent=self._agent,
             tools=build_tools(self.client),
         )
@@ -497,13 +514,21 @@ class GetInfoAgentCrew:
 # -------------------------
 # CLI
 # -------------------------
-def _ensure_gemini_api():
-    if not os.getenv("GEMINI_API_KEY"):
-        print("❌ Thiếu GEMINI_API_KEY (hoặc GOOGLE_API_KEY). Đặt 1 trong 2.")
-        sys.exit(1)
+def _ensure_api_key():
+    """Check for OpenAI API key (primary) or Gemini API key (fallback)"""
+    if MODEL.startswith("openai/"):
+        if not os.getenv("OPENAI_API_KEY"):
+            print("❌ Thiếu OPENAI_API_KEY để sử dụng GPT-4 Mini. Vui lòng đặt OPENAI_API_KEY.")
+            sys.exit(1)
+    elif MODEL.startswith("gemini/"):
+        if not os.getenv("GEMINI_API_KEY"):
+            print("❌ Thiếu GEMINI_API_KEY (hoặc GOOGLE_API_KEY). Đặt 1 trong 2.")
+            sys.exit(1)
+    else:
+        print(f"⚠️ Model không được nhận dạng: {MODEL}")
 
 def run_single_query(q: str) -> str:
-    _ensure_gemini_api()
+    _ensure_api_key()
     agent = GetInfoAgentCrew()
     try:
         return agent.ask(q)
@@ -511,9 +536,10 @@ def run_single_query(q: str) -> str:
         agent.close()
 
 def run_chat():
-    _ensure_gemini_api()
+    _ensure_api_key()
     agent = GetInfoAgentCrew()
-    print("🏨 OHANA HOTEL - Enhanced CrewAI Concierge (Shared Memory)")
+    print("🏨 OHANA HOTEL - Enhanced CrewAI Concierge (GPT-4 Mini)")
+    print(f"🤖 Model: {MODEL}")
     print(f"📅 Hôm nay: {TODAY.strftime('%d/%m/%Y')}")
     print("Gõ 'quit' để thoát")
     print("-"*60)
@@ -535,7 +561,7 @@ def run_chat():
 
 if __name__ == "__main__":
     if len(sys.argv) > 1 and sys.argv[1] == "--debug":
-        _ensure_gemini_api()
+        _ensure_api_key()
         agent = GetInfoAgentCrew()
         try:
             info = agent.debug_mcp()
