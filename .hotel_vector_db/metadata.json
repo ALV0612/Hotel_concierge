@@ -1,0 +1,9 @@
+{
+  "txt_folder": "hotel_docs",
+  "processed_files": [
+    "noi_quy.txt"
+  ],
+  "total_chunks": 1,
+  "last_updated": "2025-09-19T23:27:59.348375",
+  "embedding_model": "all-MiniLM-L6-v2"
+}

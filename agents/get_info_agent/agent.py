@@ -50,7 +50,7 @@ TODAY = datetime.now().date()
 
 def _resolve_model_name() -> str:
     # Support both OpenAI and Gemini models
-    raw = os.getenv("OHANA_LLM_MODEL", "openai/gpt-4o-mini")
+    raw = os.getenv("OHANA_LLM_MODEL", "gemini/gemini-2.5-flash")
     
     # Handle OpenAI models
     if raw.startswith("gpt-"):

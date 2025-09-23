@@ -1,6 +1,10 @@
+# agents/host_agent/agent_with_shared_memory.py
+# Host Agent with Shared Memory Integration
+
 import asyncio
 import json
 import uuid
+import re
 from datetime import datetime, timedelta
 from typing import Any, AsyncIterable, Dict, List, Optional, Callable
 
@@ -30,9 +34,143 @@ from google.genai import types
 load_dotenv()
 nest_asyncio.apply()
 
-TaskCallbackArg = Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent
-TaskUpdateCallback = Callable[[TaskCallbackArg, AgentCard], Task]
+# ====== Shared Memory System ======
+class SharedMemory:
+    """Thread-safe shared memory system for multi-agent communication"""
+    
+    def __init__(self):
+        self._store: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
+    
+    def set_context(self, session_id: str, key: str, value: Any):
+        """Set context for a session"""
+        with self._lock:
+            if session_id not in self._store:
+                self._store[session_id] = {}
+            self._store[session_id][key] = value
+            self._store[session_id]['last_updated'] = datetime.now().isoformat()
+    
+    def update_booking_info(self, session_id: str, info: Dict[str, Any]):
+        """Update booking information incrementally"""
+        with self._lock:
+            if session_id not in self._store:
+                self._store[session_id] = {}
+            
+            current_booking = self._store[session_id].get('booking_info', {})
+            current_booking.update(info)
+            self._store[session_id]['booking_info'] = current_booking
+            self._store[session_id]['last_updated'] = datetime.now().isoformat()
+    
+    def get_booking_info(self, session_id: str) -> Dict[str, Any]:
+        """Get complete booking information"""
+        with self._lock:
+            return self._store.get(session_id, {}).get('booking_info', {})
+    
+    def export_for_booking_agent(self, session_id: str) -> str:
+        """Export context specifically formatted for booking agent"""
+        booking_info = self.get_booking_info(session_id)
+        if not booking_info:
+            return ""
+        # Chỉ giữ các key mà Booking Agent biết parse
+        keys = ["room_id", "check_in", "check_out", "guest_name", "phone_number", "guests"]
+        ctx = {k: booking_info[k] for k in keys if k in booking_info and booking_info[k]}
 
+        # JSON compact nhất để tránh vượt limit
+        import json as _json
+        compact = _json.dumps(ctx, ensure_ascii=False, separators=(",", ":"))
+
+        # 1 câu context ngắn (regex-friendly) đề phòng JSON bị lỗi hiếm hoi
+        line = []
+        if all(k in ctx for k in ("room_id","check_in","check_out")):
+            line.append(f"Context: Đặt {ctx['room_id']} từ {ctx['check_in']} đến {ctx['check_out']}.")
+        if "guest_name" in ctx and "phone_number" in ctx:
+            line.append(f"Tên {ctx['guest_name']}, SĐT {ctx['phone_number']}.")
+        if "guests" in ctx:
+            line.append(f"Cho {ctx['guests']} người.")
+
+        # Trả về: JSON + 1 dòng context, để ĐẦU message khi gửi đi
+        return compact + ("\n" + " ".join(line) if line else "")
+
+
+# Global shared memory instance
+import threading
+shared_memory = SharedMemory()
+
+# ====== Information Extractor ======
+class BookingInfoExtractor:
+    """Extract booking information from conversation - Fixed version"""
+    
+    @staticmethod
+    def extract_from_message(message: str) -> Dict[str, Any]:
+        """Extract booking info from any message - improved name extraction"""
+        info = {}
+        
+        # Extract room ID
+        room_match = re.search(r'\b(OH\d{3})\b', message, re.IGNORECASE)
+        if room_match:
+            info['room_id'] = room_match.group(1).upper()
+        
+        # Extract dates (YYYY-MM-DD format)
+        date_pattern = r'(\d{4}-\d{2}-\d{2})'
+        dates = re.findall(date_pattern, message)
+        if len(dates) >= 2:
+            info['check_in'] = dates[0]
+            info['check_out'] = dates[1]
+        
+        # Extract guest count
+        guest_match = re.search(r'(\d+)\s+(?:người|khách)', message, re.IGNORECASE)
+        if guest_match:
+            info['guests'] = int(guest_match.group(1))
+        
+        # IMPROVED: Extract name and phone - multiple patterns with priority
+        # Pattern 1: Name,Phone (highest priority for comma-separated format)
+        comma_pattern = r'([A-ZÀ-Ỹ][a-zA-ZÀ-ỹ\s]+?),\s*(0\d{9,10})'
+        comma_match = re.search(comma_pattern, message)
+        if comma_match:
+            name_candidate = comma_match.group(1).strip()
+            # Validate Vietnamese name (at least 2 words, no digits)
+            if len(name_candidate.split()) >= 2 and not re.search(r'\d', name_candidate):
+                info['guest_name'] = name_candidate
+                info['phone_number'] = comma_match.group(2).strip()
+        
+        # Pattern 2: Name + space + Phone (if comma pattern didn't work)
+        if 'guest_name' not in info:
+            space_pattern = r'([A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+)+)\s+(0\d{9,10})'
+            space_match = re.search(space_pattern, message)
+            if space_match:
+                name_candidate = space_match.group(1).strip()
+                if len(name_candidate.split()) >= 2 and not re.search(r'\d', name_candidate):
+                    info['guest_name'] = name_candidate
+                    info['phone_number'] = space_match.group(2).strip()
+        
+        # Pattern 3: Try to find name separately if not found above
+        if 'guest_name' not in info:
+            # Look for Vietnamese name patterns
+            name_patterns = [
+                r'[Tt]ên\s+(?:khách\s+)?(?:là\s+)?([A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+)+)',
+                r'[Tt]ôi\s+là\s+([A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+)+)',
+                # r'([A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+){1,3})(?=\s*[,.\n]|$)',
+                # Special pattern for "Name nha" format
+                r'([A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+(?:\s+[A-ZÀ-Ỹ][a-zA-ZÀ-ỹ]+)+)\s+nha?'
+            ]
+            for pattern in name_patterns:
+                match = re.search(pattern, message, re.IGNORECASE)
+                if match:
+                    candidate = match.group(1).strip()
+                    # Validate Vietnamese name
+                    if (len(candidate.split()) >= 2 and 
+                        not re.search(r'\d', candidate) and
+                        len(candidate) > 3):  # Minimum length check
+                        info['guest_name'] = candidate
+                        break
+        
+        # Pattern 4: Find phone separately if not found
+        if 'phone_number' not in info:
+            phone_match = re.search(r'\b(0\d{9,10})\b', message)
+            if phone_match:
+                info['phone_number'] = phone_match.group(1)
+        
+        return info
 
 # ====== Remote Agent Connection Class ======
 class RemoteAgentConnections:
@@ -56,15 +194,16 @@ class RemoteAgentConnections:
     ) -> SendMessageResponse:
         return await self.agent_client.send_message(message_request)
 
-
-# ====== Main Host Agent Class ======
+# ====== Enhanced Host Agent Class ======
 class OhanaHostAgent:
-    """The Ohana Hotel Host Agent - coordinates between GetInfo and Booking agents using A2A framework with unified session management."""
+    """Enhanced Ohana Hotel Host Agent with shared memory integration."""
 
     def __init__(self):
         self.remote_agent_connections: Dict[str, RemoteAgentConnections] = {}
         self.cards: Dict[str, AgentCard] = {}
         self.agents: str = ""
+        self.shared_memory = shared_memory
+        self.extractor = BookingInfoExtractor()
         self._agent = self.create_agent()
         self._user_id = "ohana_host"
         self._runner = Runner(
@@ -112,73 +251,96 @@ class OhanaHostAgent:
         """Create the ADK Agent with tools."""
         return Agent(
             model="gemini-2.5-flash",
-            name="Ohana_Host_Agent",
+            name="Ohana_Host_Agent_Enhanced",
             instruction=self.root_instruction,
-            description="Host agent for Ohana Hotel booking system using A2A shared context.",
+            description="Enhanced host agent with shared memory for Ohana Hotel booking system.",
             tools=[
-                self.send_message,  # Only tool: communicate with backend agents
+                self.send_message,
             ],
         )
 
     def root_instruction(self, context: ReadonlyContext) -> str:
-        """Generate dynamic instruction with current date and agent info."""
+        """Generate dynamic instruction with enhanced date handling."""
         today = datetime.now()
         weekdays = ['Thứ Hai', 'Thứ Ba', 'Thứ Tư', 'Thứ Năm', 'Thứ Sáu', 'Thứ Bảy', 'Chủ Nhật']
         
-        tomorrow = today + timedelta(days=1)
-        day_after_tomorrow = today + timedelta(days=2)
+        # Calculate this weekend and next weekend
+        current_weekday = today.weekday()  # 0=Monday, 6=Sunday
+        days_to_saturday = (5 - current_weekday) % 7
+        days_to_sunday = (6 - current_weekday) % 7
+        
+        this_saturday = today + timedelta(days=days_to_saturday)
+        this_sunday = today + timedelta(days=days_to_sunday)
+        
+        next_saturday = this_saturday + timedelta(days=7)
+        next_sunday = this_sunday + timedelta(days=7)
         
         return f"""
-**Vai trò:** Bạn là Ohana Host Agent - trung gian điều hướng thông minh cho hệ thống đặt phòng khách sạn sử dụng ngữ cảnh chia sẻ A2A.
+        **Vai trò:** Bạn là Ohana Assistance - với shared memory system để ghi nhớ thông tin qua session.
 
-**Thông tin ngày hiện tại:**
-- Hôm nay: {today.strftime('%Y-%m-%d')} ({weekdays[today.weekday()]}) – {today.strftime('%d/%m/%Y')}
-- Ngày mai: {tomorrow.strftime('%Y-%m-%d')} ({weekdays[tomorrow.weekday()]}) – {tomorrow.strftime('%d/%m/%Y')}
-- Ngày mốt: {day_after_tomorrow.strftime('%Y-%m-%d')} ({weekdays[day_after_tomorrow.weekday()]}) – {day_after_tomorrow.strftime('%d/%m/%Y')}
+        **THÔNG TIN THỜI GIAN:**
+        - Ngày hiện tại: {today.strftime('%Y-%m-%d')} ({weekdays[today.weekday()]})
+        - Cuối tuần này: {this_saturday.strftime('%Y-%m-%d')} đến {this_sunday.strftime('%Y-%m-%d')}
+        - Cuối tuần sau: {next_saturday.strftime('%Y-%m-%d')} đến {next_sunday.strftime('%Y-%m-%d')}
 
-**Hệ thống ngữ cảnh chia sẻ A2A:**
-- Tất cả agents tự động chia sẻ ngữ cảnh qua unified session management
-- Backend agents có thể truy cập toàn bộ lịch sử hội thoại qua sessionId
-- Không cần lặp lại thông tin - agents tự nhớ các tương tác trước đó
-- Handoff liền mạch giữa GetInfo và Booking agents
+        **XỬ LÝ THỜI GIAN THÔNG MINH:**
+        - "cuối tuần này" = {this_saturday.strftime('%Y-%m-%d')} đến {this_sunday.strftime('%Y-%m-%d')}
+        - "cuối tuần sau/tới" = {next_saturday.strftime('%Y-%m-%d')} đến {next_sunday.strftime('%Y-%m-%d')}
+        - "tuần sau" = từ {(today + timedelta(days=7)).strftime('%Y-%m-%d')} trở đi
+        - "hôm nay" = {today.strftime('%Y-%m-%d')}
+        - "ngày mai" = {(today + timedelta(days=1)).strftime('%Y-%m-%d')}
 
-**Chỉ thị cốt lõi:**
-1. **Điều phối thuần túy:** Bạn chỉ điều hướng - dùng tool send_message để ủy quyền cho backend agents
-2. **Lựa chọn agent:** Chọn đúng backend agent cho từng nhiệm vụ:
-   - **Ohana GetInfo Agent:** Tìm phòng trống, thông tin khách sạn, chính sách, dịch vụ
-   - **Ohana Booking Agent:** Đặt phòng, xác nhận, thanh toán, quản lý reservation
-3. **Ủy quyền thông minh:** Gửi tin nhắn rõ ràng, có ngữ cảnh đến backend agents
-4. **Nhận diện phòng:** Số 3 chữ số (100-999) với từ khóa đặt phòng = số phòng
-5. **Xử lý ngày:** Nhận DD/MM/YYYY, chuyển sang YYYY-MM-DD cho backend
-6. **Nhận thức ngữ cảnh:** Backend agents chia sẻ ngữ cảnh qua unified sessionId
+        **SHARED MEMORY SYSTEM:**
+        - Hệ thống tự động lưu trữ và chia sẻ thông tin booking giữa các agents
+        - Thông tin được tích lũy qua cuộc trò chuyện: phòng, ngày, tên khách, SĐT
+        - Khi gửi đến Booking Agent, tự động kèm theo context đã thu thập
+        - **QUAN TRỌNG:** Luôn chuyển đổi thời gian tương đối thành ngày cụ thể (YYYY-MM-DD)
 
-**Quy trình đặt phòng:**
-1. **Thu thập yêu cầu:** Số khách, ngày nhận/trả phòng → send_message tới Ohana GetInfo Agent
-2. **Tìm phòng:** "Tìm phòng cho X khách từ ngày Y đến Z"
-3. **Lựa chọn:** User chọn phòng → send_message tới Ohana Booking Agent
-4. **Xác nhận:** Hoàn tất chi tiết đặt phòng với Ohana Booking Agent
-5. **Câu hỏi thêm:** Gửi câu hỏi chung tới Ohana GetInfo Agent
+        **QUY TRÌNH THÔNG MINH:**
+        1. **GetInfo Agent:** Tìm kiếm phòng, thông tin khách sạn
+        2. **Shared Memory:** Tự động lưu thông tin phòng, ngày được chọn (đã convert sang YYYY-MM-DD)
+        3. **Booking Agent:** Nhận context đầy đủ với ngày cụ thể để đặt phòng
 
-**Ví dụ send_message:**
-- Tới Ohana GetInfo Agent: "Tôi cần phòng cho 4 người từ 15/12 đến 17/12"
-- Tới Ohana Booking Agent: "Đặt phòng OH101 cho khách Nguyễn Văn A, SĐT 0987654321"
-- Tới Ohana GetInfo Agent: "Giờ check-in và check-out là mấy giờ?"
+        **NHIỆM VỤ CỐT LÕI:**
+        - Phân tích user input để trích xuất thông tin booking
+        - **CHUYỂN ĐỔI thời gian tương đối thành ngày cụ thể**
+        - Chọn agent phù hợp cho từng task
+        - Tự động enrichment context khi gửi đến Booking Agent
+        - Đảm bảo thông tin được truyền đạt đầy đủ và chính xác
 
-**Công cụ có sẵn:**
-- `send_message(agent_name, task)` - Gửi nhiệm vụ tới backend agent được chỉ định
+        **Backend Agents:**
+        {self.agents}
 
-**Phong cách phản hồi:**
-- Thân thiện và chuyên nghiệp
-- Dùng bullet points để rõ ràng khi cần thiết
-- Xác nhận các chi tiết quan trọng với user
-- Hướng dẫn user qua quy trình đặt phòng một cách mượt mà
+        **EXAMPLE FLOWS:**
+        User: "Tôi cần phòng cho 2 người cuối tuần này"
+        → Convert: "cuối tuần này" = {this_saturday.strftime('%Y-%m-%d')} đến {this_sunday.strftime('%Y-%m-%d')}
+        → Send to GetInfo Agent: "Tìm phòng cho 2 người từ {this_saturday.strftime('%Y-%m-%d')} đến {this_sunday.strftime('%Y-%m-%d')}"
 
-**Backend Agents có sẵn:**
-{self.agents}
-"""
+        User: "Tôi cần phòng cuối tuần sau"  
+        → Convert: "cuối tuần sau" = {next_saturday.strftime('%Y-%m-%d')} đến {next_sunday.strftime('%Y-%m-%d')}
+        → Send to GetInfo Agent: "Tìm phòng từ {next_saturday.strftime('%Y-%m-%d')} đến {next_sunday.strftime('%Y-%m-%d')}"
 
+        User: "Tôi chọn phòng 102" 
+        → Store room_id in memory
+        → Send to GetInfo Agent: "Thông tin chi tiết phòng OH102"
+
+        User: "Đặt phòng đi, tên tôi là Khánh Hòa, 0937401803"
+        → Store guest info in memory  
+        → Send to Booking Agent with FULL CONTEXT: "Context: Khách đã chọn phòng OH102 từ [specific_date] đến [specific_date]. Tên khách Khánh Hòa, số điện thoại 0937401803. Xác nhận đặt phòng."
+
+        **LƯU Ý QUAN TRỌNG:**
+        - LUÔN chuyển đổi "cuối tuần này/sau", "tuần tới" thành ngày cụ thể
+        - Không để thời gian tương đối trong memory hoặc gửi đến backend agents
+        - Xác nhận lại với user về ngày đã convert: "Bạn muốn đặt từ [date] đến [date], đúng không?"
+        - Trước khi booking, phải cho người dùng xác nhận lại thông tin có đúng hay không.
+        """
     async def stream(self, query: str, session_id: str) -> AsyncIterable[Dict[str, Any]]:
-        """Stream the agent's response to a query with unified session management."""
+        """Stream the agent's response with memory integration."""
+        # Extract and store booking info from user query
+        booking_info = self.extractor.extract_from_message(query)
+        if booking_info:
+            self.shared_memory.update_booking_info(session_id, booking_info)
+        
         # Ensure session exists in ADK
         session = await self._runner.session_service.get_session(
             app_name=self._agent.name,
@@ -190,11 +352,10 @@ class OhanaHostAgent:
             session = await self._runner.session_service.create_session(
                 app_name=self._agent.name,
                 user_id=self._user_id,
-                state={"unified_session_id": session_id},  # Store unified session_id
+                state={"unified_session_id": session_id},
                 session_id=session_id,
             )
         else:
-            # Update existing session with unified session_id
             session.state = session.state or {}
             session.state["unified_session_id"] = session_id
 
@@ -222,14 +383,13 @@ class OhanaHostAgent:
                     "updates": "Host agent is processing your request...",
                 }
 
-    # ====== Tool Method ======
     async def send_message(
         self, 
         agent_name: str, 
         task: str, 
         tool_context: ToolContext
     ) -> str:
-        """Send a task to a specified backend agent using A2A with unified session management."""
+        """Enhanced send_message with shared memory integration."""
         
         if agent_name not in self.remote_agent_connections:
             available_agents = list(self.remote_agent_connections.keys())
@@ -237,38 +397,38 @@ class OhanaHostAgent:
 
         client = self.remote_agent_connections[agent_name]
         
-        # CRITICAL: Use HOST AGENT's session_id for shared context
-        # Priority 1: Get unified session_id from ADK session state
+        # Get session ID
         session_id = None
         if tool_context and tool_context.state:
             session_id = tool_context.state.get("unified_session_id")
         
-        # Priority 2: Try to get session_id from tool_context attributes
-        if not session_id and tool_context and hasattr(tool_context, 'session_id'):
-            session_id = tool_context.session_id
-        
-        # Priority 3: Get from general state
-        if not session_id and tool_context and tool_context.state:
-            session_id = tool_context.state.get("session_id")
-        
-        # Fallback: Generate unified session if none found
         if not session_id:
             session_id = f"ohana-unified-{int(datetime.now().timestamp())}"
         
-        # Normalize the task message (dates, room numbers)
-        clean_task = self._normalize_message(task)
+        # Extract booking info from current task
+        task_booking_info = self.extractor.extract_from_message(task)
+        if task_booking_info:
+            self.shared_memory.update_booking_info(session_id, task_booking_info)
         
-        # Create unique message ID for A2A
+        # Enhance task with context for Booking Agent
+        enhanced_task = task
+        if "Booking Agent" in agent_name:
+            context = self.shared_memory.export_for_booking_agent(session_id)
+            if context:
+                enhanced_task = f"{context}. {task}"
+                print(f"[DEBUG] Enhanced task for Booking Agent: {enhanced_task}")
+        
+        # Normalize the task message
+        clean_task = self._normalize_message(enhanced_task)
+        
+        # Create A2A message
         message_id = str(uuid.uuid4())
-        
-        # A2A message payload with unified session
         payload = {
             "message": {
                 "role": "user",
                 "parts": [{"type": "text", "text": clean_task}],
                 "messageId": message_id,
             },
-            # Add unified sessionId for shared context across all agents
             "sessionId": session_id
         }
 
@@ -280,7 +440,6 @@ class OhanaHostAgent:
         try:
             send_response: SendMessageResponse = await client.send_message(message_request)
             
-            # Handle different response types
             if hasattr(send_response.root, 'error'):
                 error_info = send_response.root.error
                 return f"Backend error: {error_info.message} (code: {error_info.code})"
@@ -288,18 +447,21 @@ class OhanaHostAgent:
             if not isinstance(send_response.root, SendMessageSuccessResponse):
                 return f"Unexpected response from {agent_name}"
             
-            # Extract response text from backend agent
             response_text = self._extract_message_text(send_response.root.result)
+            
+            # Extract booking info from response
+            response_booking_info = self.extractor.extract_from_message(response_text)
+            if response_booking_info:
+                self.shared_memory.update_booking_info(session_id, response_booking_info)
+            
             return response_text
 
         except Exception as e:
             return f"Error communicating with {agent_name}: {e}"
 
-    # ====== Helper Methods ======
     def _extract_message_text(self, result) -> str:
-        """Extract text from A2A Message object (simplified for backend that returns Messages)."""
+        """Extract text from A2A Message object."""
         try:
-            # Handle Message objects (what backend returns)
             if hasattr(result, 'parts') and result.parts:
                 all_texts = []
                 for part in result.parts:
@@ -311,7 +473,6 @@ class OhanaHostAgent:
                 if all_texts:
                     return "\n".join(all_texts)
             
-            # Fallback: direct text attribute
             if hasattr(result, 'text') and result.text:
                 return result.text.strip()
             
@@ -321,24 +482,23 @@ class OhanaHostAgent:
             return f"Error extracting response: {str(e)}"
 
     def _normalize_message(self, text: str) -> str:
-        """Normalize message - convert dates and room IDs for backend compatibility."""
+        """Normalize message - convert dates and room IDs."""
         import re
         
-        # Convert DD/MM/YYYY to YYYY-MM-DD for backend compatibility
+        # Convert DD/MM/YYYY to YYYY-MM-DD
         def convert_date(match):
             day, month, year = match.groups()
             return f"{year}-{month.zfill(2)}-{day.zfill(2)}"
         
         normalized = re.sub(r'(\d{1,2})/(\d{1,2})/(\d{4})', convert_date, text)
         
-        # Convert 3-digit room numbers to OH format (101 → OH101)
+        # Convert 3-digit room numbers to OH format
         def convert_room(match):
             number = match.group(1)
             if len(number) == 3 and number.isdigit() and 100 <= int(number) <= 999:
                 return f"OH{number}"
             return match.group(0)
         
-        # Only convert standalone 3-digit numbers or those with booking keywords
         booking_pattern = r'\b(\d{3})\b(?=\s*(?:nhé|đi|ok|phòng|room|lấy|chọn|book)?)'
         normalized = re.sub(booking_pattern, convert_room, normalized, flags=re.IGNORECASE)
         
@@ -347,20 +507,19 @@ class OhanaHostAgent:
 
 # ====== Factory Function ======
 def _get_initialized_ohana_host_agent_sync():
-    """Synchronously creates and initializes the OhanaHostAgent."""
+    """Synchronously creates and initializes the enhanced OhanaHostAgent."""
     
     async def _async_main():
-        # Backend agent URLs for Ohana Hotel system
         backend_agent_urls = [
             "http://localhost:10002",  # GetInfo Agent
             "http://localhost:9999",   # Booking Agent
         ]
         
-        print("Initializing Ohana Host Agent with A2A...")
+        print("Initializing Enhanced Ohana Host Agent with Shared Memory...")
         host_agent_instance = await OhanaHostAgent.create(
             remote_agent_addresses=backend_agent_urls
         )
-        print("Ohana Host Agent initialized successfully")
+        print("Enhanced Ohana Host Agent initialized successfully")
         return host_agent_instance
 
     try:
@@ -368,7 +527,6 @@ def _get_initialized_ohana_host_agent_sync():
     except RuntimeError as e:
         if "asyncio.run() cannot be called from a running event loop" in str(e):
             print("Warning: Event loop already running. Using existing loop.")
-            # For Jupyter/existing event loop environments
             try:
                 loop = asyncio.get_event_loop()
                 return loop.run_until_complete(_async_main())
@@ -378,21 +536,17 @@ def _get_initialized_ohana_host_agent_sync():
         else:
             raise
 
-
 # Create the root agent for export
 root_agent = _get_initialized_ohana_host_agent_sync()
-
 
 # ====== Main Demo ======
 if __name__ == "__main__":
     async def demo():
-        """Demo CLI for testing the Ohana Host Agent with A2A shared context."""
-        print("Ohana Host Agent - A2A Unified Session Version")
-        print("Features: A2A Framework, Unified Session Management, Seamless Agent Communication")
-        print("Backend agents share conversation context automatically via unified sessionId")
+        """Demo CLI with shared memory."""
+        print("Ohana Host Agent Enhanced - Shared Memory Version")
+        print("Features: Shared Memory, Context Accumulation, Smart Agent Routing")
         print("-" * 80)
         
-        # Initialize host agent
         try:
             host_agent = await OhanaHostAgent.create([
                 "http://localhost:10002",  # GetInfo Agent
@@ -402,11 +556,10 @@ if __name__ == "__main__":
             print(f"Failed to initialize: {e}")
             return
         
-        # Generate unified session ID
         session_id = f"ohana-unified-{int(datetime.now().timestamp())}"
-        print(f"Unified Session ID: {session_id}")
+        print(f"Session ID: {session_id}")
         print(f"Today: {datetime.now().strftime('%d/%m/%Y (%A) - %H:%M')}")
-        print("\nCommands: 'quit' to exit, 'new' for new session")
+        print("\nCommands: 'quit' to exit, 'new' for new session, 'memory' to view stored info")
         print("-" * 80)
         
         while True:
@@ -419,32 +572,30 @@ if __name__ == "__main__":
                 
                 if query.lower() in {"new", "reset", "restart"}:
                     session_id = f"ohana-unified-{int(datetime.now().timestamp())}"
-                    print(f"New unified session created: {session_id}")
+                    print(f"New session created: {session_id}")
+                    continue
+                
+                if query.lower() == "memory":
+                    booking_info = shared_memory.get_booking_info(session_id)
+                    print(f"Stored booking info: {json.dumps(booking_info, ensure_ascii=False, indent=2)}")
                     continue
                 
                 if not query:
                     continue
                 
                 print("\nHost Agent: ", end="")
-                response_complete = False
                 
                 async for response in host_agent.stream(query, session_id):
                     if response["is_task_complete"]:
                         print(response["content"])
-                        response_complete = True
                     else:
                         print(".", end="", flush=True)
                 
-                if not response_complete:
-                    print("\nNo response received")
-                
             except KeyboardInterrupt:
-                print("\n\nGoodbye! Thanks for using Ohana Hotel!")
+                print("\n\nGoodbye!")
                 break
             except Exception as e:
                 print(f"\nError: {e}")
-                print("Please try again or type 'quit' to exit.")
 
-    # Run the demo
-    print("Starting Ohana Hotel Demo...")
+    print("Starting Enhanced Ohana Hotel Demo...")
     asyncio.run(demo())

@@ -1,138 +1,94 @@
-# pip install fastmcp gspread google-auth
+# mcp_server/server_info_mcp.py
+# Ohana Info MCP Server (PostgreSQL) - FastMCP stdio server
 
 import os
-import gspread
-from google.oauth2.service_account import Credentials
-from datetime import datetime, date
-from typing import List, Dict, Optional
+import sys
+import signal
+import asyncio
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional
+
+import asyncpg
 import fastmcp
-from hotel_local_rag import HotelLocalRAG
-
-# --- Thêm ở đầu file (gần import) ---
-import re, unicodedata
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from psycopg2 import pool
+
+# ====== ENV & LOGGING ======
 load_dotenv()
-def _slug(s: str) -> str:
-    if not s: return ""
-    s = unicodedata.normalize("NFKD", s).encode("ascii", "ignore").decode("ascii")
-    s = re.sub(r"[^a-z0-9 ]+", " ", s.lower())
-    return " ".join(s.split())
 
-# Từ khoá tiếng Việt/Anh → capacity
-_CAP_ALIASES = {
-    1: {"1", "một", "đơn", "single", "1 nguoi", "1 pax"},
-    2: {"2", "hai", "đôi", "double", "twin", "2 nguoi", "2 pax"},
-    3: {"3", "ba", "triple", "3 nguoi", "3 pax"},
-    4: {"4", "bốn", "quad", "quadruple", "4 nguoi", "4 pax"},
-}
 
-def _parse_room_hint(text: Optional[str]) -> tuple[Optional[str], Optional[int]]:
-    """
-    Trả về (type_filter, cap_hint) từ chuỗi tự nhiên như:
-    'phòng đôi', '2 người', 'deluxe', 'family 4 người', ...
-    """
-    if not text:
-        return None, None
-    s = _slug(text)
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stderr)],  # GIỮ stdout sạch cho JSON-RPC
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
+logger = logging.getLogger("ohana.info.mcp")
 
-    # Ưu tiên bắt số người nếu có '2/3/4 (nguoi|pax)'
-    m = re.search(r"(\d+)\s*(nguoi|pax)?", s)
-    if m:
-        try:
-            n = int(m.group(1))
-            if n in (1, 2, 3, 4):
-                return None, n
-        except:
-            pass
+# Optional: RAG
+try:
+    from hotel_local_rag import HotelLocalRAG
+    RAG_AVAILABLE = True
+except Exception:
+    RAG_AVAILABLE = False
 
-    for cap, words in _CAP_ALIASES.items():
-        if any(w in s for w in words):
-            return None, cap
-
-    return None, None
-
-import os, json, base64
-
-def load_sa_credentials(scopes: List[str] = None) -> Credentials:
-    """
-    Hỗ trợ: FILE PATH / RAW JSON / BASE64 JSON.
-    Ưu tiên:
-      1) GOOGLE_SERVICE_ACCOUNT_JSON (raw JSON hoặc base64)
-      2) GOOGLE_SERVICE_ACCOUNT_FILE (file path)
-      3) GOOGLE_APPLICATION_CREDENTIALS (path chuẩn của Google SDK)
-    """
-    # Default scopes nếu không được cung cấp
-    if scopes is None:
-        scopes = [
-            'https://www.googleapis.com/auth/spreadsheets',
-            'https://www.googleapis.com/auth/drive'
-        ]
+# ====== DB MANAGER ======
+class DatabaseManager:
+    def __init__(self):
+        self.connection_pool = psycopg2.pool.SimpleConnectionPool(
+            1, 20,  # min=1, max=20 connections
+            host=os.environ['DB_HOST'],
+            port=os.environ.get('DB_PORT', 5432),
+            database=os.environ['DB_NAME'],
+            user=os.environ['DB_USER'],
+            password=os.environ['DB_PASSWORD']
+        )
     
-    raw = (
-        os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")  # ← Sửa: thêm _JSON
-        or os.getenv("GOOGLE_SERVICE_ACCOUNT_FILE")
-        or os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    def get_connection(self):
+        return self.connection_pool.getconn()
+    
+    def put_connection(self, conn):
+        self.connection_pool.putconn(conn)
+    
+    def execute_query(self, query: str, params=None) -> List[Dict]:
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                if cur.description:  # SELECT query
+                    return [dict(row) for row in cur.fetchall()]
+                else:  # INSERT/UPDATE/DELETE
+                    conn.commit()
+                    return []
+        finally:
+            self.put_connection(conn)
+
+# Initialize database manager
+db = DatabaseManager()
+mcp = fastmcp.FastMCP("Ohana Info MCP Server")
+# Replace the complex RAG initialization with this simple version:
+try:
+    from hotel_local_rag import HotelLocalRAG
+    hotel_rag = HotelLocalRAG(
+        vector_db_path=".hotel_vector_db",
+        embedding_model_name="all-MiniLM-L6-v2",
     )
-    
-    if not raw:
-        raise RuntimeError("Missing service account credentials (JSON or file path).")
+    RAG_AVAILABLE = hotel_rag.is_ready()
+    print(f"RAG initialized: {RAG_AVAILABLE}")
+except Exception as e:
+    print(f"RAG initialization failed: {e}")
+    hotel_rag = None
+    RAG_AVAILABLE = False
 
-    raw = raw.strip()
-
-    # (1) Nếu là JSON trực tiếp
-    if raw.startswith("{"):
-        try:
-            info = json.loads(raw)
-            return Credentials.from_service_account_info(info, scopes=scopes)  # ← Sửa: scopes
-        except Exception as e:
-            raise RuntimeError(f"Invalid inline JSON for service account: {e}")
-
-    # (2) Nếu là BASE64 của JSON
-    try:
-        decoded = base64.b64decode(raw).decode("utf-8")
-        if decoded.strip().startswith("{"):
-            info = json.loads(decoded)
-            return Credentials.from_service_account_info(info, scopes=scopes)  # ← Sửa: scopes
-    except Exception:
-        pass  # không phải base64 → thử như file path
-
-    # (3) Xử lý như FILE PATH
-    if not os.path.exists(raw):
-        raise RuntimeError(f"Service account file not found: {raw}")
-    return Credentials.from_service_account_file(raw, scopes=scopes)  # ← Sửa: scopes
-
-# --- Khởi tạo FastMCP ---
-mcp = fastmcp.FastMCP("Ohana Hotel Booking")
-
-SHEET_ID = os.environ["OHANA_SHEET_ID"]
-CREDS_FILE = os.environ["GOOGLE_SERVICE_ACCOUNT_FILE"]
-
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-creds = load_sa_credentials(SCOPES)
-gc = gspread.authorize(creds)
-
-sh = gc.open_by_key(SHEET_ID)
-rooms_ws = sh.worksheet("Rooms")
-bookings_ws = sh.worksheet("Bookings")
-
-rooms = rooms_ws.get_all_records()
-bookings = bookings_ws.get_all_records()
-
-# --- Helpers ---
-def d(s: str) -> date:
-    return datetime.fromisoformat(str(s)).date()
-
-BLOCK = {"confirmed", "paid", "hold", "reserved"}
-
-def overlap(a1: date, a2: date, b1: date, b2: date) -> bool:
-    return not (a2 <= b1 or a1 >= b2)
-
-# --- Convert thành MCP Tools ---
-
+# ====== TOOLS ======
 @mcp.tool()
 def get_room_types() -> List[str]:
     """Lấy danh sách tất cả các loại phòng có sẵn"""
-    return _get_room_types()
+    query = "SELECT DISTINCT room_type FROM rooms WHERE status = 'active' ORDER BY room_type"
+    results = db.execute_query(query)
+    return [row['room_type'] for row in results]
 
 @mcp.tool()
 def check_availability(
@@ -148,114 +104,149 @@ def check_availability(
         check_in: Ngày check-in (YYYY-MM-DD)
         check_out: Ngày check-out (YYYY-MM-DD) 
         guests: Số khách (mặc định: 1)
-        room_type: Loại phòng (tùy chọn, ví dụ: "Deluxe")
+        room_type: Loại phòng (standard/deluxe/family/suite)
     """
-    return _check_availability(check_in, check_out, guests, room_type)
-
-@mcp.tool()
-def refresh_data() -> str:
-    """Refresh dữ liệu từ Google Sheets"""
-    global rooms, bookings
-    try:
-        rooms = rooms_ws.get_all_records()
-        bookings = bookings_ws.get_all_records()
-        return f"Đã refresh thành công! {len(rooms)} phòng, {len(bookings)} booking"
-    except Exception as e:
-        return f"Lỗi refresh: {str(e)}"
+    
+    query = """
+    SELECT r.room_id, r.room_type, r.capacity, r.base_price, r.description
+    FROM rooms r
+    WHERE r.status = 'active' 
+    AND r.capacity >= %s
+    AND NOT EXISTS (
+        SELECT 1 FROM bookings b 
+        WHERE b.room_id = r.room_id 
+        AND b.status IN ('confirmed', 'paid', 'hold', 'reserved')
+        AND (b.check_in < %s AND b.check_out > %s)
+    )
+    """
+    
+    params = [guests, check_out, check_in]
+    
+    # Add room type filter - exact match for standard/deluxe/family/suite
+    if room_type:
+        room_type_lower = room_type.lower().strip()
+        valid_types = ['standard', 'deluxe', 'family', 'suite']
+        
+        if room_type_lower in valid_types:
+            query += " AND LOWER(r.room_type) = %s"
+            params.append(room_type_lower)
+    
+    query += " ORDER BY r.room_type, r.base_price"
+    
+    return db.execute_query(query, params)
 
 @mcp.tool()
 def get_room_info(room_id: str) -> Dict:
     """Lấy thông tin chi tiết của một phòng"""
-    for r in rooms:
-        if r["room_id"] == room_id:
-            return r
-    return {"error": f"Không tìm thấy phòng {room_id}"}
+    query = "SELECT * FROM rooms WHERE room_id = %s"
+    results = db.execute_query(query, [room_id])
+    
+    if results:
+        return results[0]
+    else:
+        return {"error": f"Không tìm thấy phòng {room_id}"}
 
 @mcp.tool()
 def get_bookings_by_room(room_id: str) -> List[Dict]:
     """Lấy tất cả booking của một phòng"""
-    room_bookings = [b for b in bookings if b["room_id"] == room_id]
-    return sorted(room_bookings, key=lambda x: x.get("check_in", ""))
+    query = """
+    SELECT b.*, c.guest_name, c.guest_phone 
+    FROM bookings b
+    JOIN customers c ON b.customer_id = c.customer_id
+    WHERE b.room_id = %s
+    ORDER BY b.check_in DESC
+    """
+    return db.execute_query(query, [room_id])
 
 @mcp.tool()
 def search_guest(guest_name: str) -> List[Dict]:
-    """Tìm kiếm booking theo tên khách (khớp từng từ)"""
-    results = []
-    search_words = guest_name.lower().strip().split()
-    
-    for b in bookings:
-        guest_full_name = str(b.get("guest_name", "")).lower().strip()
-        if not guest_full_name:
-            continue
-            
-        guest_words = guest_full_name.split()
-        
-        # Tất cả từ trong search phải có trong guest_words
-        if all(search_word in guest_words for search_word in search_words):
-            results.append(b)
-    
-    return sorted(results, key=lambda x: x.get("check_in", ""))
-
+    """Tìm kiếm booking theo tên khách"""
+    query = """
+    SELECT b.*, c.guest_name, c.guest_phone, r.room_type
+    FROM bookings b
+    JOIN customers c ON b.customer_id = c.customer_id
+    JOIN rooms r ON b.room_id = r.room_id
+    WHERE c.guest_name ILIKE %s
+    ORDER BY b.check_in DESC
+    """
+    return db.execute_query(query, [f"%{guest_name}%"])
 
 @mcp.tool()
 def get_bookings_by_status(status: str) -> List[Dict]:
-    """Lấy booking theo trạng thái (confirmed, paid, hold, reserved, etc.)"""
-    results = [b for b in bookings if str(b.get("status", "")).strip().lower() == status.lower()]
-    return sorted(results, key=lambda x: x.get("check_in", ""))
+    """Lấy booking theo trạng thái"""
+    query = """
+    SELECT b.*, c.guest_name, c.guest_phone, r.room_type
+    FROM bookings b
+    JOIN customers c ON b.customer_id = c.customer_id
+    JOIN rooms r ON b.room_id = r.room_id
+    WHERE b.status = %s
+    ORDER BY b.check_in DESC
+    """
+    return db.execute_query(query, [status])
 
 @mcp.tool()
-def check_room_busy_periods(room_id: str) -> List[Dict]:
-    """Kiểm tra các khoảng thời gian phòng bị chiếm"""
-    busy_periods = []
-    for b in bookings:
-        if b["room_id"] == room_id and str(b.get("status","")).strip().lower() in BLOCK:
-            busy_periods.append({
-                "booking_id": b["booking_id"],
-                "check_in": b["check_in"],
-                "check_out": b["check_out"],
-                "status": b["status"]
-            })
-    return sorted(busy_periods, key=lambda x: x["check_in"])
-
-
-
-@mcp.tool() 
 def hotel_summary() -> Dict:
     """Tổng quan về khách sạn"""
+    
     # Room summary
-    room_types = {}
-    total_capacity = 0
-    for r in rooms:
-        room_type = r["type"]
-        capacity = int(r["capacity"])
-        room_types[room_type] = room_types.get(room_type, 0) + 1
-        total_capacity += capacity
+    room_query = """
+    SELECT 
+        COUNT(*) as total_rooms,
+        SUM(capacity) as total_capacity,
+        room_type,
+        COUNT(*) as count_by_type
+    FROM rooms 
+    WHERE status = 'active'
+    GROUP BY room_type
+    """
     
     # Booking summary
-    status_counts = {}
-    for b in bookings:
-        status = b.get("status", "unknown")
-        status_counts[status] = status_counts.get(status, 0) + 1
+    booking_query = """
+    SELECT 
+        status,
+        COUNT(*) as count
+    FROM bookings
+    GROUP BY status
+    """
+    
+    room_results = db.execute_query(room_query)
+    booking_results = db.execute_query(booking_query)
     
     return {
-        "total_rooms": len(rooms),
-        "total_capacity": total_capacity,
-        "room_types": room_types,
-        "total_bookings": len(bookings),
-        "booking_status": status_counts
+        "total_rooms": sum(r['count_by_type'] for r in room_results),
+        "total_capacity": sum(r['total_capacity'] for r in room_results) if room_results else 0,
+        "room_types": {r['room_type']: r['count_by_type'] for r in room_results},
+        "booking_status": {b['status']: b['count'] for b in booking_results}
     }
 
-# Initialize RAG system (Local Embeddings - FREE)
+@mcp.tool()
+def refresh_data() -> str:
+    """Test database connection"""
+    try:
+        query = "SELECT COUNT(*) as room_count FROM rooms"
+        room_count = db.execute_query(query)[0]['room_count']
+        
+        query = "SELECT COUNT(*) as booking_count FROM bookings"
+        booking_count = db.execute_query(query)[0]['booking_count']
+        
+        return f"Database connected! {room_count} phòng, {booking_count} booking"
+    except Exception as e:
+        return f"Database connection error: {str(e)}"
+
 hotel_rag = HotelLocalRAG(
-    vector_db_path=".hotel_vector_db",
-    embedding_model_name="all-MiniLM-L6-v2",  # Free local model
+    vector_db_path="D:\\test\\hotel_vector_db",
+    embedding_model_name="all-MiniLM-L6-v2"
 )
+
+# Add this line that was missing:
+RAG_AVAILABLE = hotel_rag.is_ready()
 
 @mcp.tool()
 def query_hotel_docs(question: str, top_k: int = 3) -> List[Dict]:
     """Tìm kiếm thông tin trong tài liệu khách sạn"""
+    if not hotel_rag or not RAG_AVAILABLE:
+        return [{"error": "RAG system not available"}]
     return hotel_rag.query(question, k=top_k)
-
 # @mcp.tool()
 # def setup_hotel_documents(txt_folder: str = None, pdf_folder: str = None) -> Dict:
 #     """Setup tài liệu khách sạn từ thư mục TXT hoặc PDF"""
@@ -271,53 +262,8 @@ def hotel_rag_summary() -> Dict:
     """Thông tin về hệ thống RAG"""
     return hotel_rag.get_summary()
 
-def _get_room_types():
-    return sorted({r["type"] for r in rooms})
 
-def _check_availability(check_in: str, check_out: str, guests: int = 1, room_type: Optional[str] = None):
-    type_filter, cap_hint = _parse_room_hint(room_type)
-    try:
-        guests = max(1, int(guests))
-    except Exception:
-        guests = 1
-    if cap_hint:  # nếu user nói 'phòng đôi/ba/bốn' → ép guests tương ứng
-        guests = max(guests, cap_hint)
-
-    BLOCK = {"confirmed", "paid", "hold", "reserved"}
-    def d(s: str): 
-        return datetime.strptime(s, "%Y-%m-%d").date()
-    def overlap(a1, a2, b1, b2):
-        return a1 < b2 and b1 < a2
-
-    ci, co = d(check_in), d(check_out)
-    by_room: dict[str, list[tuple[date, date]]] = {}
-    for b in bookings:
-        if str(b.get("status","")).strip().lower() in BLOCK:
-            by_room.setdefault(b["room_id"], []).append((d(b["check_in"]), d(b["check_out"])))
-
-    avail = []
-    for r in rooms:
-        # capacity theo số người
-        try:
-            if int(r["capacity"]) < guests:
-                continue
-        except Exception:
-            continue
-
-        # nếu người dùng có yêu cầu hạng phòng (Standard/Deluxe/Family/Suite)
-        if type_filter and _slug(r["type"]) != _slug(type_filter):
-            continue
-
-        busy = any(overlap(ci, co, s, e) for (s, e) in by_room.get(r["room_id"], []))
-        if not busy:
-            avail.append({
-                "room_id": r["room_id"],
-                "type": r["type"],
-                "capacity": r["capacity"],
-                "base_price": r["base_price"],
-            })
-    return avail
-
+# ====== ENTRYPOINT ======
 if __name__ == "__main__":
     import os, sys, logging
     logging.basicConfig(level=logging.INFO)

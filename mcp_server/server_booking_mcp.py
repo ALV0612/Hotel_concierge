@@ -1,13 +1,29 @@
-# pip install fastmcp gspread google-auth tzdata
+# mcp_server/server_booking_mcp.py
+# Ohana Booking MCP Server (PostgreSQL) - FastMCP stdio server
 
-import os, time, random
-import fastmcp
-import gspread
-from google.oauth2.service_account import Credentials
-from typing import Dict, Optional, List
+import os
+import sys
+import signal
+import asyncio
+import logging
 from datetime import datetime
+from typing import Dict, List, Optional
+
+import fastmcp
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import RealDictCursor
+from psycopg2 import pool
+
+# ====== ENV & LOGGING ======
 load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    handlers=[logging.StreamHandler(sys.stderr)],  # GIỮ stdout sạch cho JSON-RPC
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+)
+logger = logging.getLogger("ohana.booking.mcp")
 
 try:
     from zoneinfo import ZoneInfo  # Py3.9+
@@ -21,85 +37,71 @@ def _now_vn():
     except Exception:
         return datetime.now()
 
-print(f"Current GOOGLE_API_KEY: {os.environ.get('GOOGLE_API_KEY','NOT_SET')[:10]}...")
-
-booking_agent = fastmcp.FastMCP("Ohana Booking Agent - A2A Protocol")
-
-SHEET_ID = os.environ.get("OHANA_SHEET_ID")
-CREDS_FILE = os.environ.get("GOOGLE_SERVICE_ACCOUNT_FILE")
-
-# --- ENV VALIDATION (NEW) ---
-if not SHEET_ID:
-    raise RuntimeError("Missing OHANA_SHEET_ID")
-if not CREDS_FILE or not os.path.exists(CREDS_FILE):
-    raise RuntimeError("Missing GOOGLE_SERVICE_ACCOUNT_FILE or path not found")
-
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
-creds = Credentials.from_service_account_file(CREDS_FILE, scopes=SCOPES)
-gc = gspread.authorize(creds)
-sh = gc.open_by_key(SHEET_ID)
-
-# --- ENSURE WORKSHEET + HEADERS (NEW) ---
-HEADERS = ["booking_id","room_id","check_in","check_out","status","guest_name","phone_number"]
-
-def _ensure_sheet():
-    try:
-        ws = sh.worksheet("Bookings")
-    except gspread.WorksheetNotFound:
-        ws = sh.add_worksheet(title="Bookings", rows=1000, cols=len(HEADERS))
-        ws.append_row(HEADERS)
-        return ws
-    # ensure headers
-    first_row = ws.row_values(1)
-    if [h.lower() for h in first_row] != HEADERS:
-        # rewrite header (idempotent)
-        ws.resize(1)
-        ws.update("A1", [HEADERS])
-    return ws
-
-bookings_ws = _ensure_sheet()
-
-# --- small backoff helper (NEW) ---
-def _gs_append_row(ws, row, tries=3):
-    for i in range(tries):
+# ====== DB MANAGER ======
+class DatabaseManager:
+    def __init__(self):
+        self.connection_pool = psycopg2.pool.SimpleConnectionPool(
+            1, 20,  # min=1, max=20 connections
+            host=os.environ['DB_HOST'],
+            port=os.environ.get('DB_PORT', 5432),
+            database=os.environ['DB_NAME'],
+            user=os.environ['DB_USER'],
+            password=os.environ['DB_PASSWORD']
+        )
+    
+    def get_connection(self):
+        return self.connection_pool.getconn()
+    
+    def put_connection(self, conn):
+        self.connection_pool.putconn(conn)
+    
+    def execute_query(self, query: str, params=None) -> List[Dict]:
+        conn = self.get_connection()
         try:
-            return ws.append_row(row)
-        except Exception as e:
-            if i == tries - 1:
-                raise
-            time.sleep(0.4 + 0.2 * i + random.random()*0.2)
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                if cur.description:  # SELECT query
+                    return [dict(row) for row in cur.fetchall()]
+                else:  # INSERT/UPDATE/DELETE
+                    conn.commit()
+                    return []
+        finally:
+            self.put_connection(conn)
+    
+    def execute_query_returning(self, query: str, params=None) -> List[Dict]:
+        """Execute query with RETURNING clause"""
+        conn = self.get_connection()
+        try:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                cur.execute(query, params)
+                conn.commit()
+                if cur.description:
+                    return [dict(row) for row in cur.fetchall()]
+                return []
+        finally:
+            self.put_connection(conn)
 
-# Helpers
+# Initialize database manager and FastMCP
+db = DatabaseManager()
+booking_agent = fastmcp.FastMCP("Ohana Booking Agent - PostgreSQL")
+
+# ====== HELPER FUNCTIONS ======
 def generate_booking_id() -> str:
     """BKG-YYYYMMDD-XXXX (đếm trong ngày)."""
     today = datetime.now().strftime("%Y%m%d")
-    existing_bookings = bookings_ws.get_all_records()
-    today_bookings = [b.get("booking_id","") for b in existing_bookings if str(b.get("booking_id","")).startswith(f"BKG-{today}")]
-    last_num = 0
-    for b in today_bookings:
-        try:
-            last_num = max(last_num, int(str(b).split("-")[-1]))
-        except Exception:
-            pass
-    return f"BKG-{today}-{(last_num+1):04d}"
+    
+    # Count existing bookings today
+    query = """
+    SELECT COUNT(*) as count 
+    FROM bookings 
+    WHERE booking_id LIKE %s
+    """
+    results = db.execute_query(query, [f"BKG-{today}-%"])
+    count = results[0]['count'] if results else 0
+    
+    return f"BKG-{today}-{(count + 1):04d}"
 
-def add_booking_to_sheet(booking_data: Dict) -> Dict:
-    try:
-        booking_id = generate_booking_id()
-        new_row = [
-            booking_id,
-            booking_data["room_id"],
-            booking_data["check_in"],
-            booking_data["check_out"],
-            booking_data.get("status", "confirmed"),
-            booking_data["guest_name"],
-            booking_data.get("phone_number", ""),
-        ]
-        _gs_append_row(bookings_ws, new_row)  # FIX: retry
-        return {"success": True, "booking_id": booking_id, "message": f"Booking {booking_id} đã được lưu vào Google Sheets"}
-    except Exception as e:
-        return {"success": False, "error": str(e), "message": "Lỗi khi thêm booking vào Google Sheets"}
-
+# ====== BOOKING TOOLS ======
 @booking_agent.tool()
 def create_booking(
     room_id: str,
@@ -109,125 +111,361 @@ def create_booking(
     phone_number: Optional[str] = None,
     status: str = "confirmed"
 ) -> Dict:
+    """
+    Tạo booking mới với tính toán giá tự động
+    
+    Args:
+        room_id: Mã phòng
+        check_in: Ngày check-in (YYYY-MM-DD)
+        check_out: Ngày check-out (YYYY-MM-DD)
+        guest_name: Tên khách hàng
+        phone_number: Số điện thoại (tùy chọn)
+        status: Trạng thái booking (confirmed/paid/hold/reserved)
+    """
     now_vn = _now_vn()
     today_vn = now_vn.date().isoformat()
 
+    # Validate required fields
     if not all([room_id, check_in, check_out, guest_name]):
         return {
             "success": False,
             "message": "Thiếu thông tin bắt buộc",
             "required_fields": ["room_id", "check_in", "check_out", "guest_name"],
-            "server_time": {"today_vn": today_vn, "now_vn": now_vn.isoformat(timespec="seconds"), "timezone": "Asia/Ho_Chi_Minh" if _VN_TZ else "local"}
+            "server_time": {
+                "today_vn": today_vn, 
+                "now_vn": now_vn.isoformat(timespec="seconds"), 
+                "timezone": "Asia/Ho_Chi_Minh" if _VN_TZ else "local"
+            }
         }
 
-    booking_data = {
-        "room_id": room_id,
-        "check_in": check_in,
-        "check_out": check_out,
-        "guest_name": guest_name.strip(),
-        "phone_number": (phone_number or "").strip(),
-        "status": status
-    }
+    try:
+        # 1. Check room exists and get price info
+        room_check_query = """
+        SELECT room_id, room_type, capacity, base_price, status 
+        FROM rooms 
+        WHERE room_id = %s AND status = 'active'
+        """
+        room_results = db.execute_query(room_check_query, [room_id])
+        
+        if not room_results:
+            return {
+                "success": False,
+                "message": f"Phòng {room_id} không tồn tại hoặc không khả dụng"
+            }
 
-    result = add_booking_to_sheet(booking_data)
-    if result.get("success"):
+        # 2. Calculate total amount IMMEDIATELY after getting room info
+        room_info = room_results[0]
+        room_price = room_info['base_price']
+        
+        # Parse dates and calculate nights
         ci_date = datetime.strptime(check_in, "%Y-%m-%d")
         co_date = datetime.strptime(check_out, "%Y-%m-%d")
         nights = (co_date - ci_date).days
-        return {
-            "success": True,
-            "booking_id": result["booking_id"],
-            "message": "✅ Booking thành công!",
-            "server_time": {"today_vn": today_vn, "now_vn": now_vn.isoformat(timespec="seconds"), "timezone": "Asia/Ho_Chi_Minh" if _VN_TZ else "local"},
-            "booking_details": {
-                "booking_id": result["booking_id"],
-                "room_id": room_id, "check_in": check_in, "check_out": check_out, "nights": nights,
-                "guest_name": guest_name, "phone_number": phone_number or "N/A", "status": status
+        
+        if nights <= 0:
+            return {
+                "success": False,
+                "message": "Ngày check-out phải sau ngày check-in"
             }
-        }
-    else:
-        result.setdefault("server_time", {"today_vn": today_vn, "now_vn": now_vn.isoformat(timespec="seconds"), "timezone": "Asia/Ho_Chi_Minh" if _VN_TZ else "local"})
-        return result
+        
+        # Calculate total amount
+        total_amount = room_price * nights
 
+        # 3. Generate booking ID
+        booking_id = generate_booking_id()
+        
+        # 4. Handle customer - check if exists or create new
+        customer_query = """
+        SELECT customer_id FROM customers 
+        WHERE guest_name = %s AND guest_phone = %s
+        """
+        customer_results = db.execute_query(
+            customer_query, 
+            [guest_name.strip(), (phone_number or "").strip()]
+        )
+        
+        if customer_results:
+            customer_id = customer_results[0]['customer_id']
+        else:
+            # Create new customer
+            insert_customer_query = """
+            INSERT INTO customers (guest_name, guest_phone)
+            VALUES (%s, %s)
+            RETURNING customer_id
+            """
+            customer_results = db.execute_query_returning(
+                insert_customer_query, 
+                [guest_name.strip(), (phone_number or "").strip()]
+            )
+            customer_id = customer_results[0]['customer_id']
+
+        # 5. Create booking with calculated total_amount
+        insert_booking_query = """
+        INSERT INTO bookings (
+            booking_id, room_id, customer_id, check_in, check_out, total_amount, status
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        RETURNING *
+        """
+        
+        booking_results = db.execute_query_returning(
+            insert_booking_query,
+            [booking_id, room_id, customer_id, check_in, check_out, total_amount, status]
+        )
+
+        if booking_results:
+            # Format price display
+            formatted_amount = f"{total_amount:,}".replace(",", ".")
+            
+            return {
+                "success": True,
+                "booking_id": booking_id,
+                "message": "✅ Booking thành công!",
+                "server_time": {
+                    "today_vn": today_vn,
+                    "now_vn": now_vn.isoformat(timespec="seconds"),
+                    "timezone": "Asia/Ho_Chi_Minh" if _VN_TZ else "local"
+                },
+                "booking_details": {
+                    "booking_id": booking_id,
+                    "room_id": room_id,
+                    "room_type": room_info['room_type'],
+                    "check_in": check_in,
+                    "check_out": check_out,
+                    "nights": nights,
+                    "guest_name": guest_name,
+                    "phone_number": phone_number or "N/A",
+                    "status": status,
+                    "customer_id": customer_id,
+                    "base_price": room_price,
+                    "total_amount": total_amount,
+                    "formatted_amount": f"{formatted_amount} VND"
+                }
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Lỗi khi tạo booking trong database"
+            }
+
+    except ValueError as ve:
+        logger.error(f"Date parsing error: {ve}")
+        return {
+            "success": False,
+            "error": str(ve),
+            "message": "Lỗi định dạng ngày tháng"
+        }
+    except Exception as e:
+        logger.error(f"Error creating booking: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Lỗi khi tạo booking"
+        }
 @booking_agent.tool()
 def update_booking_status(booking_id: str, new_status: str) -> Dict:
+    """Cập nhật trạng thái booking"""
     valid_statuses = ["confirmed", "paid", "hold", "reserved", "cancelled"]
+    
     if new_status.lower() not in valid_statuses:
-        return {"success": False, "message": f"Status không hợp lệ", "valid_statuses": valid_statuses}
+        return {
+            "success": False,
+            "message": f"Status không hợp lệ",
+            "valid_statuses": valid_statuses
+        }
+
     try:
-        all_values = bookings_ws.get_all_values()
-        if not all_values:  # không có dữ liệu
-            return {"success": False, "message": f"Không tìm thấy booking {booking_id}"}
-        header_row = [h.lower() for h in all_values[0]]
-        try:
-            status_col = header_row.index("status") + 1
-        except ValueError:
-            return {"success": False, "message": "Thiếu cột 'status' trong sheet"}
-        booking_row_index = None
-        for i, row in enumerate(all_values[1:], start=2):
-            if row and len(row) > 0 and row[0] == booking_id:
-                booking_row_index = i
-                break
-        if not booking_row_index:
-            return {"success": False, "message": f"Không tìm thấy booking {booking_id}"}
-        bookings_ws.update_cell(booking_row_index, status_col, new_status.lower())
-        return {"success": True, "message": f"Đã update status thành '{new_status}'", "booking_id": booking_id, "new_status": new_status}
+        # Check if booking exists
+        check_query = "SELECT booking_id, status FROM bookings WHERE booking_id = %s"
+        existing = db.execute_query(check_query, [booking_id])
+        
+        if not existing:
+            return {
+                "success": False,
+                "message": f"Không tìm thấy booking {booking_id}"
+            }
+
+        # Update status (no updated_at column in schema)
+        update_query = """
+        UPDATE bookings 
+        SET status = %s 
+        WHERE booking_id = %s
+        RETURNING booking_id, status
+        """
+        
+        results = db.execute_query_returning(
+            update_query, 
+            [new_status.lower(), booking_id]
+        )
+
+        if results:
+            return {
+                "success": True,
+                "message": f"Đã update status thành '{new_status}'",
+                "booking_id": booking_id,
+                "new_status": new_status.lower(),
+                "old_status": existing[0]['status']
+            }
+        else:
+            return {
+                "success": False,
+                "message": "Lỗi khi update status"
+            }
+
     except Exception as e:
-        return {"success": False, "error": str(e), "message": "Lỗi khi update status"}
+        logger.error(f"Error updating booking status: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e),
+            "message": "Lỗi khi update status"
+        }
 
 @booking_agent.tool()
 def get_booking_by_id(booking_id: str) -> Dict:
+    """Tra cứu booking theo mã"""
     try:
-        for b in bookings_ws.get_all_records():
-            if str(b.get("booking_id","")) == booking_id:
-                return {"success": True, "booking": b}
-        return {"success": False, "message": f"Không tìm thấy booking {booking_id}"}
+        query = """
+        SELECT 
+            b.*,
+            c.guest_name,
+            c.guest_phone,
+            r.room_type,
+            r.capacity,
+            r.base_price
+        FROM bookings b
+        JOIN customers c ON b.customer_id = c.customer_id
+        JOIN rooms r ON b.room_id = r.room_id
+        WHERE b.booking_id = %s
+        """
+        
+        results = db.execute_query(query, [booking_id])
+        
+        if results:
+            return {
+                "success": True,
+                "booking": results[0]
+            }
+        else:
+            return {
+                "success": False,
+                "message": f"Không tìm thấy booking {booking_id}"
+            }
+
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        logger.error(f"Error getting booking by ID: {str(e)}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
 
 @booking_agent.tool()
 def search_bookings_by_guest(guest_name: str) -> List[Dict]:
+    """Tìm booking theo tên khách"""
     try:
-        bookings = bookings_ws.get_all_records()
-        q = [w for w in guest_name.lower().split() if w]
-        out = []
-        for b in bookings:
-            g = str(b.get("guest_name","")).lower().strip()
-            if g and all(w in g for w in q):
-                out.append(b)
-        return sorted(out, key=lambda x: x.get("check_in",""), reverse=True)
+        query = """
+        SELECT 
+            b.*,
+            c.guest_name,
+            c.guest_phone,
+            r.room_type,
+            r.capacity
+        FROM bookings b
+        JOIN customers c ON b.customer_id = c.customer_id
+        JOIN rooms r ON b.room_id = r.room_id
+        WHERE c.guest_name ILIKE %s
+        ORDER BY b.check_in DESC
+        """
+        
+        results = db.execute_query(query, [f"%{guest_name}%"])
+        return results
+
     except Exception as e:
+        logger.error(f"Error searching bookings by guest: {str(e)}")
         return [{"error": str(e), "message": "Lỗi khi search bookings"}]
 
 @booking_agent.tool()
 def get_recent_bookings(limit: int = 10) -> List[Dict]:
+    """Xem booking gần đây"""
     try:
-        bookings = bookings_ws.get_all_records()
-        active = [b for b in bookings if str(b.get("status","")).lower() != "cancelled"]
-        return sorted(active, key=lambda x: x.get("check_in",""), reverse=True)[:max(1, int(limit))]
+        query = """
+        SELECT 
+            b.*,
+            c.guest_name,
+            c.guest_phone,
+            r.room_type,
+            r.capacity
+        FROM bookings b
+        JOIN customers c ON b.customer_id = c.customer_id
+        JOIN rooms r ON b.room_id = r.room_id
+        WHERE b.status != 'cancelled'
+        ORDER BY b.created_at DESC
+        LIMIT %s
+        """
+        
+        results = db.execute_query(query, [max(1, int(limit))])
+        return results
+
     except Exception as e:
+        logger.error(f"Error getting recent bookings: {str(e)}")
         return [{"error": str(e), "message": "Lỗi khi lấy recent bookings"}]
 
 @booking_agent.tool()
 def get_booking_stats() -> Dict:
+    """Thống kê booking"""
     try:
-        bookings = bookings_ws.get_all_records()
-        status_counts: Dict[str,int] = {}
-        for b in bookings:
-            status = str(b.get("status","unknown")).lower()
-            status_counts[status] = status_counts.get(status, 0) + 1
+        # Total bookings by status
+        status_query = """
+        SELECT status, COUNT(*) as count
+        FROM bookings
+        GROUP BY status
+        """
+        status_results = db.execute_query(status_query)
+        status_breakdown = {row['status']: row['count'] for row in status_results}
+        
+        # Total bookings
+        total_query = "SELECT COUNT(*) as total FROM bookings"
+        total_results = db.execute_query(total_query)
+        total_bookings = total_results[0]['total'] if total_results else 0
+        
+        # Today's check-ins and check-outs
         today = datetime.now().strftime("%Y-%m-%d")
-        today_checkins  = [b for b in bookings if b.get("check_in")  == today and str(b.get("status","")).lower() in ("confirmed","paid")]
-        today_checkouts = [b for b in bookings if b.get("check_out") == today and str(b.get("status","")).lower() in ("confirmed","paid")]
-        return {"total_bookings": len(bookings), "status_breakdown": status_counts, "today": {"check_ins": len(today_checkins), "check_outs": len(today_checkouts), "date": today}}
+        
+        checkin_query = """
+        SELECT COUNT(*) as count
+        FROM bookings
+        WHERE check_in = %s AND status IN ('confirmed', 'paid')
+        """
+        checkin_results = db.execute_query(checkin_query, [today])
+        today_checkins = checkin_results[0]['count'] if checkin_results else 0
+        
+        checkout_query = """
+        SELECT COUNT(*) as count
+        FROM bookings
+        WHERE check_out = %s AND status IN ('confirmed', 'paid')
+        """
+        checkout_results = db.execute_query(checkout_query, [today])
+        today_checkouts = checkout_results[0]['count'] if checkout_results else 0
+        
+        return {
+            "total_bookings": total_bookings,
+            "status_breakdown": status_breakdown,
+            "today": {
+                "check_ins": today_checkins,
+                "check_outs": today_checkouts,
+                "date": today
+            }
+        }
+
     except Exception as e:
+        logger.error(f"Error getting booking stats: {str(e)}")
         return {"error": str(e), "message": "Lỗi khi lấy statistics"}
 
 @booking_agent.tool()
 def get_agent_capabilities() -> Dict:
+    """Thông tin về khả năng của agent"""
     return {
         "agent_name": "Ohana Booking Agent",
-        "version": "1.0.0",
+        "version": "2.0.0 - PostgreSQL",
         "capabilities": [
             "create_booking - Tạo booking mới",
             "update_booking_status - Cập nhật trạng thái booking",
@@ -243,11 +481,48 @@ def get_agent_capabilities() -> Dict:
             "guest_name": "Tên khách",
             "phone_number": "Số ĐT (optional)"
         },
-        "integration": {"storage": "Google Sheets", "sheet_name": "Bookings"}
+        "integration": {
+            "storage": "PostgreSQL Database",
+            "tables": ["bookings", "customers", "rooms"]
+        }
     }
 
+@booking_agent.tool()
+def refresh_booking_data() -> str:
+    """Test database connection và hiển thị thống kê"""
+    try:
+        # Test connection
+        query = "SELECT COUNT(*) as booking_count FROM bookings"
+        booking_count = db.execute_query(query)[0]['booking_count']
+        
+        query = "SELECT COUNT(*) as customer_count FROM customers"
+        customer_count = db.execute_query(query)[0]['customer_count']
+        
+        # Recent booking
+        query = """
+        SELECT b.booking_id, c.guest_name, b.status, b.created_at
+        FROM bookings b
+        JOIN customers c ON b.customer_id = c.customer_id
+        ORDER BY b.created_at DESC
+        LIMIT 1
+        """
+        recent = db.execute_query(query)
+        recent_info = ""
+        if recent:
+            recent_booking = recent[0]
+            recent_info = f", booking gần nhất: {recent_booking['booking_id']} ({recent_booking['guest_name']})"
+        
+        return f"Database connected! {booking_count} booking, {customer_count} khách hàng{recent_info}"
+        
+    except Exception as e:
+        logger.error(f"Database connection error: {str(e)}")
+        return f"Database connection error: {str(e)}"
+
+# ====== ENTRYPOINT ======
 if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.INFO)
-    logging.getLogger("booking_agent").info("Starting Booking Agent MCP server...")
+    log = logging.getLogger("ohana.booking")
+    
+    log.info("Starting Booking MCP server...")
     booking_agent.run()  # FastMCP stdio

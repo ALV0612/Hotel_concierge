@@ -373,7 +373,7 @@ if __name__ == "__main__":
         sys.exit(1)
 
     setup_hotel_rag(
-        pdf_folder=pdf_folder,
+        pdf_folder="D:\\test\Data",
         vector_db_path=vector_db,
         embedding_model=args.embedding_model,
     )
